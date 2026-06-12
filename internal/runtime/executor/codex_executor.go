@@ -21,6 +21,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/runtime/executor/helps"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/signature"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/thinking"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/tklite"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
@@ -821,6 +822,9 @@ func (e *CodexExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, re
 	body, replayScope := applyCodexReasoningReplayCache(ctx, from, req, opts, body)
 	reporter.SetTranslatedReasoningEffort(body, to.String())
 
+	// tklite cache optimization
+	body = tklite.Optimize(ctx, e.cfg, "/v1/responses", body, opts.Headers)
+
 	url := strings.TrimSuffix(baseURL, "/") + "/responses"
 	var identityState codexIdentityConfuseState
 	httpReq, upstreamBody, identityState, err := e.cacheHelper(ctx, from, url, auth, req, originalPayloadSource, body)
@@ -1097,6 +1101,9 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 	body = sanitizeOpenAIResponsesReasoningEncryptedContent(ctx, "codex executor", body)
 	body, replayScope := applyCodexReasoningReplayCache(ctx, from, req, opts, body)
 	reporter.SetTranslatedReasoningEffort(body, to.String())
+
+	// tklite cache optimization
+	body = tklite.Optimize(ctx, e.cfg, "/v1/responses", body, opts.Headers)
 
 	url := strings.TrimSuffix(baseURL, "/") + "/responses"
 	var identityState codexIdentityConfuseState

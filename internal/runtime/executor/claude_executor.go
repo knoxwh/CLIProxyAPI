@@ -24,6 +24,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/runtime/executor/helps"
 	sigcompat "github.com/router-for-me/CLIProxyAPI/v7/internal/signature"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/thinking"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/tklite"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
@@ -204,6 +205,9 @@ func (e *ClaudeExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 	// Disable thinking if tool_choice forces tool use (Anthropic API constraint)
 	body = disableThinkingIfToolChoiceForced(body)
 	body = normalizeClaudeTemperatureForThinking(body)
+
+	// tklite cache optimization
+	body = tklite.Optimize(ctx, e.cfg, "/v1/messages", body, opts.Headers)
 
 	// Auto-inject cache_control if missing (optimization for ClawdBot/clients without caching support)
 	if countCacheControls(body) == 0 {
@@ -386,6 +390,9 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 	// Disable thinking if tool_choice forces tool use (Anthropic API constraint)
 	body = disableThinkingIfToolChoiceForced(body)
 	body = normalizeClaudeTemperatureForThinking(body)
+
+	// tklite cache optimization
+	body = tklite.Optimize(ctx, e.cfg, "/v1/messages", body, opts.Headers)
 
 	// Auto-inject cache_control if missing (optimization for ClawdBot/clients without caching support)
 	if countCacheControls(body) == 0 {
