@@ -824,6 +824,7 @@ func (e *CodexExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, re
 
 	// tklite cache optimization
 	body = tklite.Optimize(ctx, e.cfg, "/v1/responses", body, opts.Headers)
+	body = CacheOptPostTKLite(auth, body, req)
 
 	url := strings.TrimSuffix(baseURL, "/") + "/responses"
 	var identityState codexIdentityConfuseState
@@ -943,6 +944,7 @@ func (e *CodexExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, re
 			completedData = completedDataPatched
 		}
 		cacheCodexReasoningReplayFromCompleted(replayScope, completedData)
+		CacheOptStoreResponseID(auth, req, completedData)
 
 		var param any
 		clientCompletedData := applyCodexIdentityExposeResponsePayload(completedData, identityState)
@@ -1104,6 +1106,7 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 
 	// tklite cache optimization
 	body = tklite.Optimize(ctx, e.cfg, "/v1/responses", body, opts.Headers)
+	body = CacheOptPostTKLite(auth, body, req)
 
 	url := strings.TrimSuffix(baseURL, "/") + "/responses"
 	var identityState codexIdentityConfuseState
@@ -1195,6 +1198,7 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 					publishCodexImageToolUsage(ctx, reporter, body, data)
 					data = patchCodexCompletedOutput(data, outputItemsByIndex, outputItemsFallback)
 					cacheCodexReasoningReplayFromCompleted(replayScope, data)
+					CacheOptStoreResponseID(auth, req, data)
 					translatedLine = append([]byte("data: "), data...)
 				}
 			}
@@ -1452,6 +1456,7 @@ func (e *CodexExecutor) cacheHelper(ctx context.Context, from sdktranslator.Form
 	}
 
 	if cache.ID != "" {
+		cache.ID = CacheOptResolveCacheKey(auth, rawJSON, cache.ID)
 		rawJSON, _ = sjson.SetBytes(rawJSON, "prompt_cache_key", cache.ID)
 	}
 	var identityState codexIdentityConfuseState

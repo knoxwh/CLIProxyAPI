@@ -63,11 +63,11 @@ func Optimize(ctx context.Context, cfg *config.Config, endpoint string, body []b
 // ── Header forwarding ─────────────────────────────────────────────────────
 
 // forwardHeaders lists headers relevant to tklite optimization.
-// x-api-key is intentionally excluded: tklite does not need the upstream
-// API key for cache optimization, and forwarding secrets to a separate
-// process violates least-privilege.
+// x-api-key is forwarded (hashed by tklite for session/drift tracking;
+// the raw key is never logged — only a SHA-256 prefix is used).
 var forwardHeaders = []string{
 	"anthropic-beta",
+	"x-api-key",
 	"x-headroom-session-id",
 	"x-headroom-bypass",
 	"x-client",
