@@ -391,9 +391,6 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 	body = disableThinkingIfToolChoiceForced(body)
 	body = normalizeClaudeTemperatureForThinking(body)
 
-	// tklite cache optimization
-	body = tklite.Optimize(ctx, e.cfg, "/v1/messages", body, opts.Headers)
-
 	// Auto-inject cache_control if missing (optimization for ClawdBot/clients without caching support)
 	if countCacheControls(body) == 0 {
 		body = ensureCacheControl(body)
@@ -404,6 +401,9 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 
 	// Normalize TTL values to prevent ordering violations under prompt-caching-scope-2026-01-05.
 	body = normalizeCacheControlTTL(body)
+
+	// tklite cache optimization (after existing cache_control logic; tklite detects existing markers and skips placement)
+	body = tklite.Optimize(ctx, e.cfg, "/v1/messages", body, opts.Headers)
 
 	// Extract betas from body and convert to header
 	var extraBetas []string

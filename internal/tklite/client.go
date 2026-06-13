@@ -21,6 +21,11 @@ import (
 )
 
 // ── Singleton client ──────────────────────────────────────────────────────
+// NOTE: sync.Once locks the socket path after first initialization.
+// If the socket path changes at runtime (e.g. config hot-reload), the client
+// will continue using the original path. This is acceptable because executor
+// config pointers are set at construction time and do not change during the
+// lifetime of a server instance.
 
 var (
 	defaultClient     *Client
@@ -58,9 +63,11 @@ func Optimize(ctx context.Context, cfg *config.Config, endpoint string, body []b
 // ── Header forwarding ─────────────────────────────────────────────────────
 
 // forwardHeaders lists headers relevant to tklite optimization.
+// x-api-key is intentionally excluded: tklite does not need the upstream
+// API key for cache optimization, and forwarding secrets to a separate
+// process violates least-privilege.
 var forwardHeaders = []string{
 	"anthropic-beta",
-	"x-api-key",
 	"x-headroom-session-id",
 	"x-headroom-bypass",
 	"x-client",
@@ -92,6 +99,9 @@ type Client struct {
 }
 
 // NewClient creates a tklite client connected to the given Unix socket path.
+// No Client.Timeout is set — per project rules, timeouts are only allowed
+// during connection acquisition (the 2s DialTimeout); once the upstream
+// connection is established, no further timeouts are applied.
 func NewClient(socketPath string) *Client {
 	transport := &http.Transport{
 		DialContext: func(_ context.Context, _, _ string) (net.Conn, error) {
@@ -104,19 +114,19 @@ func NewClient(socketPath string) *Client {
 	return &Client{
 		httpClient: &http.Client{
 			Transport: transport,
-			Timeout:   5 * time.Second,
 		},
 		socketPath: socketPath,
 	}
 }
 
 // Optimize sends a request body to tklite for cache optimization.
-// Returns the optimized body, or the original body on error.
+// Returns the optimized body on success. On error, returns (nil, err)
+// so the caller can decide the fallback strategy (typically: use original body).
 func (c *Client) Optimize(ctx context.Context, endpoint string, body []byte, headers map[string]string) ([]byte, error) {
 	url := "http://localhost" + endpoint
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
 	if err != nil {
-		return body, fmt.Errorf("tklite: build request: %w", err)
+		return nil, fmt.Errorf("tklite: build request: %w", err)
 	}
 	req.Header.Set("Content-Type", "application/json")
 	for k, v := range headers {
@@ -125,18 +135,18 @@ func (c *Client) Optimize(ctx context.Context, endpoint string, body []byte, hea
 
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
-		return body, fmt.Errorf("tklite: request failed: %w", err)
+		return nil, fmt.Errorf("tklite: request failed: %w", err)
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
 		io.Copy(io.Discard, resp.Body)
-		return body, fmt.Errorf("tklite: unexpected status %d", resp.StatusCode)
+		return nil, fmt.Errorf("tklite: unexpected status %d", resp.StatusCode)
 	}
 
 	optimized, err := io.ReadAll(resp.Body)
 	if err != nil {
-		return body, fmt.Errorf("tklite: read response: %w", err)
+		return nil, fmt.Errorf("tklite: read response: %w", err)
 	}
 
 	return optimized, nil

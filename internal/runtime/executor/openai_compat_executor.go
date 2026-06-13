@@ -335,7 +335,7 @@ func (e *OpenAICompatExecutor) ExecuteStream(ctx context.Context, auth *cliproxy
 	translated, _ = sjson.SetBytes(translated, "stream_options.include_usage", true)
 	reporter.SetTranslatedReasoningEffort(translated, to.String())
 
-	// tklite cache optimization
+	// tklite cache optimization (no endpoint filter needed: image and responses/compact paths already branched off)
 	translated = tklite.Optimize(ctx, e.cfg, "/v1/chat/completions", translated, opts.Headers)
 
 	url := strings.TrimSuffix(baseURL, "/") + "/chat/completions"
