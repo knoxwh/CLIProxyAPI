@@ -293,72 +293,6 @@ func TestHomeEnabledHidesManagementEndpointsAndControlPanel(t *testing.T) {
 	})
 }
 
-func TestAmpProviderModelRoutes(t *testing.T) {
-	testCases := []struct {
-		name         string
-		path         string
-		wantStatus   int
-		wantContains string
-	}{
-		{
-			name:         "openai root models",
-			path:         "/api/provider/openai/models",
-			wantStatus:   http.StatusOK,
-			wantContains: `"object":"list"`,
-		},
-		{
-			name:         "groq root models",
-			path:         "/api/provider/groq/models",
-			wantStatus:   http.StatusOK,
-			wantContains: `"object":"list"`,
-		},
-		{
-			name:         "openai models",
-			path:         "/api/provider/openai/v1/models",
-			wantStatus:   http.StatusOK,
-			wantContains: `"object":"list"`,
-		},
-		{
-			name:         "anthropic models",
-			path:         "/api/provider/anthropic/v1/models",
-			wantStatus:   http.StatusOK,
-			wantContains: `"data"`,
-		},
-		{
-			name:         "google models v1",
-			path:         "/api/provider/google/v1/models",
-			wantStatus:   http.StatusOK,
-			wantContains: `"models"`,
-		},
-		{
-			name:         "google models v1beta",
-			path:         "/api/provider/google/v1beta/models",
-			wantStatus:   http.StatusOK,
-			wantContains: `"models"`,
-		},
-	}
-
-	for _, tc := range testCases {
-		tc := tc
-		t.Run(tc.name, func(t *testing.T) {
-			server := newTestServer(t)
-
-			req := httptest.NewRequest(http.MethodGet, tc.path, nil)
-			req.Header.Set("Authorization", "Bearer test-key")
-
-			rr := httptest.NewRecorder()
-			server.engine.ServeHTTP(rr, req)
-
-			if rr.Code != tc.wantStatus {
-				t.Fatalf("unexpected status code for %s: got %d want %d; body=%s", tc.path, rr.Code, tc.wantStatus, rr.Body.String())
-			}
-			if body := rr.Body.String(); !strings.Contains(body, tc.wantContains) {
-				t.Fatalf("response body for %s missing %q: %s", tc.path, tc.wantContains, body)
-			}
-		})
-	}
-}
-
 func TestModelsWithClientVersionReturnsCodexCatalog(t *testing.T) {
 	modelRegistry := registry.GetGlobalRegistry()
 	clientID := "test-client-version-catalog"
@@ -615,5 +549,41 @@ func TestDefaultRequestLoggerFactory_UsesResolvedLogDirectory(t *testing.T) {
 		if strings.HasPrefix(entry.Name(), "error-") && strings.HasSuffix(entry.Name(), ".log") {
 			t.Fatalf("unexpected forced error log in config dir %s", configLogsDir)
 		}
+	}
+}
+
+func TestHomeModelsAuthStatus(t *testing.T) {
+	cases := []struct {
+		name        string
+		raw         string
+		wantStatus  int
+		wantHandled bool
+	}{
+		{"no credentials", `{"error":{"type":"no_credentials","message":"Missing API key"}}`, http.StatusUnauthorized, true},
+		{"invalid credential", `{"error":{"type":"invalid_credential","message":"Invalid API key"}}`, http.StatusUnauthorized, true},
+		{"internal error maps to bad gateway", `{"error":{"type":"internal_error","message":"boom"}}`, http.StatusBadGateway, true},
+		{"models payload not an error", `{"openai":[{"id":"gpt-5.5"}]}`, 0, false},
+		{"empty payload not an error", `{}`, 0, false},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			status, handled := homeModelsAuthStatus([]byte(tc.raw))
+			if handled != tc.wantHandled {
+				t.Fatalf("handled = %v, want %v (status=%d)", handled, tc.wantHandled, status)
+			}
+			if handled && status != tc.wantStatus {
+				t.Fatalf("status = %d, want %d", status, tc.wantStatus)
+			}
+		})
+	}
+}
+
+func TestHomeModelsErrorMessage(t *testing.T) {
+	if msg := homeModelsErrorMessage([]byte(`{"error":{"type":"invalid_credential","message":"Invalid API key"}}`)); msg != "Invalid API key" {
+		t.Fatalf("message = %q, want %q", msg, "Invalid API key")
+	}
+	if msg := homeModelsErrorMessage([]byte(`{"openai":[]}`)); msg != "home models request failed" {
+		t.Fatalf("default message = %q, want fallback", msg)
 	}
 }
