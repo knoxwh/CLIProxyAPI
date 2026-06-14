@@ -176,6 +176,23 @@ func statusCodeFromTestError(t *testing.T, err error) int {
 	return statusErr.StatusCode()
 }
 
+func TestPatchCodexCompletedOutput_ReplacesPartialCompletedOutput(t *testing.T) {
+	outputItemsByIndex := map[int64][]byte{
+		0: []byte(`{"type":"reasoning","summary":[],"content":null,"encrypted_content":"sig"}`),
+		1: []byte(`{"type":"message","role":"assistant","content":[{"type":"output_text","text":"ok"}]}`),
+	}
+	eventData := []byte(`{"type":"response.completed","response":{"id":"resp_1","output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"ok"}]}]}}`)
+
+	patched := patchCodexCompletedOutput(eventData, outputItemsByIndex, nil)
+
+	if got := gjson.GetBytes(patched, "response.output.#").Int(); got != 2 {
+		t.Fatalf("response.output length = %d, want 2; patched=%s", got, string(patched))
+	}
+	if got := gjson.GetBytes(patched, "response.output.0.type").String(); got != "reasoning" {
+		t.Fatalf("response.output[0].type = %q, want reasoning; patched=%s", got, string(patched))
+	}
+}
+
 func TestCodexExecutorExecuteStream_EmptyStreamCompletionOutputUsesOutputItemDone(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/event-stream")
