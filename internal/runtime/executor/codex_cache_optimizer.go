@@ -14,9 +14,10 @@ package executor
 import (
 	"strings"
 
+	"github.com/google/uuid"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/runtime/executor/helps"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/runtime/executor/helps"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 )
@@ -52,10 +53,7 @@ func CacheOptPostTKLite(auth *cliproxyauth.Auth, body []byte, req cliproxyexecut
 		// Trunk code deleted this field before tklite (safe for OAuth),
 		// so we re-inject it here for the API key path.
 		if !gjson.GetBytes(body, "previous_response_id").Exists() {
-			sessionKey := codexClaudeCodePromptCacheStorageKey(req)
-			if sessionKey == "" {
-				sessionKey = extractClaudeCodeSessionIDForCodexReplay(req.Payload)
-			}
+			sessionKey := cacheOptSessionResponseKey(auth, req)
 			if sessionKey != "" {
 				if lastRespID, ok := helps.GetSessionResponseID(sessionKey); ok && lastRespID != "" {
 					body, _ = sjson.SetBytes(body, "previous_response_id", lastRespID)
@@ -87,10 +85,7 @@ func CacheOptStoreResponseID(auth *cliproxyauth.Auth, req cliproxyexecutor.Reque
 	if respID == "" {
 		return
 	}
-	sessionKey := codexClaudeCodePromptCacheStorageKey(req)
-	if sessionKey == "" {
-		sessionKey = extractClaudeCodeSessionIDForCodexReplay(req.Payload)
-	}
+	sessionKey := cacheOptSessionResponseKey(auth, req)
 	if sessionKey == "" {
 		return
 	}
@@ -116,4 +111,35 @@ func CacheOptResolveCacheKey(auth *cliproxyauth.Auth, rawJSON []byte, proposedID
 		return existingKey // API key: preserve tklite's stable key
 	}
 	return proposedID // No tklite key found, use proposed uuid
+}
+
+// ─── Auth-scoped session key helpers ───────────────────────────
+//
+// Prevents cross-auth response-id reuse: two different API keys or
+// base URLs must not share a previous_response_id.
+
+func cacheOptSessionResponseKey(auth *cliproxyauth.Auth, req cliproxyexecutor.Request) string {
+	sessionKey := codexClaudeCodePromptCacheStorageKey(req)
+	if sessionKey == "" {
+		sessionKey = extractClaudeCodeSessionIDForCodexReplay(req.Payload)
+	}
+	if sessionKey == "" {
+		return ""
+	}
+	return cacheOptAuthScope(auth) + ":" + sessionKey
+}
+
+func cacheOptAuthScope(auth *cliproxyauth.Auth) string {
+	if auth == nil {
+		return "auth:unknown"
+	}
+	if strings.TrimSpace(auth.ID) != "" {
+		return "auth-id:" + strings.TrimSpace(auth.ID)
+	}
+	apiKey := strings.TrimSpace(auth.Attributes["api_key"])
+	baseURL := strings.TrimSpace(auth.Attributes["base_url"])
+	if apiKey != "" || baseURL != "" {
+		return "auth-hash:" + uuid.NewSHA1(uuid.NameSpaceOID, []byte(apiKey+"\x00"+baseURL)).String()
+	}
+	return "auth:unknown"
 }

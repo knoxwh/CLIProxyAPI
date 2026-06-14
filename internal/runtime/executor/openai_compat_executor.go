@@ -132,8 +132,11 @@ func (e *OpenAICompatExecutor) Execute(ctx context.Context, auth *cliproxyauth.A
 	reporter.SetTranslatedReasoningEffort(translated, to.String())
 
 	// tklite cache optimization
-	if endpoint == "/chat/completions" {
+	switch endpoint {
+	case "/chat/completions":
 		translated = tklite.Optimize(ctx, e.cfg, "/v1/chat/completions", translated, opts.Headers)
+	case "/responses/compact":
+		translated = tklite.Optimize(ctx, e.cfg, "/v1/responses", translated, opts.Headers)
 	}
 
 	url := strings.TrimSuffix(baseURL, "/") + endpoint

@@ -21,21 +21,22 @@ import (
 )
 
 // ── Singleton client ──────────────────────────────────────────────────────
-// NOTE: sync.Once locks the socket path after first initialization.
-// If the socket path changes at runtime (e.g. config hot-reload), the client
-// will continue using the original path. This is acceptable because executor
-// config pointers are set at construction time and do not change during the
-// lifetime of a server instance.
+// Path-aware client cache: if the socket path changes (e.g. config
+// hot-reload), a new client is created for the new path.
 
 var (
-	defaultClient     *Client
-	defaultClientOnce sync.Once
+	defaultClient       *Client
+	defaultClientSocket string
+	defaultClientMu     sync.Mutex
 )
 
 func getClient(socketPath string) *Client {
-	defaultClientOnce.Do(func() {
+	defaultClientMu.Lock()
+	defer defaultClientMu.Unlock()
+	if defaultClient == nil || defaultClientSocket != socketPath {
 		defaultClient = NewClient(socketPath)
-	})
+		defaultClientSocket = socketPath
+	}
 	return defaultClient
 }
 
@@ -51,7 +52,16 @@ func Optimize(ctx context.Context, cfg *config.Config, endpoint string, body []b
 
 	client := getClient(cfg.TKLite.Socket)
 	fwd := extractHeaders(headers)
-	optimized, err := client.Optimize(ctx, endpoint, body, fwd)
+
+	requestTimeout := time.Duration(cfg.TKLite.RequestTimeoutSeconds) * time.Second
+	optimizeCtx := ctx
+	cancel := func() {}
+	if requestTimeout > 0 {
+		optimizeCtx, cancel = context.WithTimeout(ctx, requestTimeout)
+	}
+	defer cancel()
+
+	optimized, err := client.Optimize(optimizeCtx, endpoint, body, fwd, cfg.TKLite.MaxResponseBytes)
 	if err != nil {
 		log.WithError(err).WithField("endpoint", endpoint).
 			Warn("tklite optimization failed, using original body")
@@ -63,12 +73,10 @@ func Optimize(ctx context.Context, cfg *config.Config, endpoint string, body []b
 // ── Header forwarding ─────────────────────────────────────────────────────
 
 // forwardHeaders lists headers relevant to tklite optimization.
-// x-api-key is forwarded (hashed by tklite for session/drift tracking;
-// the raw key is never logged — only a SHA-256 prefix is used).
+// Secrets (x-api-key) and session identifiers (x-headroom-session-id)
+// are not forwarded to the sidecar.
 var forwardHeaders = []string{
 	"anthropic-beta",
-	"x-api-key",
-	"x-headroom-session-id",
 	"x-headroom-bypass",
 	"x-client",
 	"x-request-id",
@@ -122,7 +130,7 @@ func NewClient(socketPath string) *Client {
 // Optimize sends a request body to tklite for cache optimization.
 // Returns the optimized body on success. On error, returns (nil, err)
 // so the caller can decide the fallback strategy (typically: use original body).
-func (c *Client) Optimize(ctx context.Context, endpoint string, body []byte, headers map[string]string) ([]byte, error) {
+func (c *Client) Optimize(ctx context.Context, endpoint string, body []byte, headers map[string]string, maxResponseBytes int64) ([]byte, error) {
 	url := "http://localhost" + endpoint
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
 	if err != nil {
@@ -144,9 +152,16 @@ func (c *Client) Optimize(ctx context.Context, endpoint string, body []byte, hea
 		return nil, fmt.Errorf("tklite: unexpected status %d", resp.StatusCode)
 	}
 
-	optimized, err := io.ReadAll(resp.Body)
+	if maxResponseBytes <= 0 {
+		maxResponseBytes = config.DefaultTKLiteMaxResponseBytes
+	}
+	limited := io.LimitReader(resp.Body, maxResponseBytes+1)
+	optimized, err := io.ReadAll(limited)
 	if err != nil {
 		return nil, fmt.Errorf("tklite: read response: %w", err)
+	}
+	if int64(len(optimized)) > maxResponseBytes {
+		return nil, fmt.Errorf("tklite: response too large: %d > %d", len(optimized), maxResponseBytes)
 	}
 
 	return optimized, nil
