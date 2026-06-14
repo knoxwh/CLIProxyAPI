@@ -36,7 +36,7 @@ import (
 )
 
 const (
-	codexUserAgent             = "codex-tui/0.135.0 (Mac OS 26.5.0; arm64) iTerm.app/3.6.10 (codex-tui; 0.135.0)"
+	codexUserAgent             = "codex-tui/0.139.0 (Mac OS 26.5.0; arm64) iTerm.app/3.6.10 (codex-tui; 0.139.0)"
 	codexOriginator            = "codex-tui"
 	codexDefaultImageToolModel = "gpt-image-2"
 )
