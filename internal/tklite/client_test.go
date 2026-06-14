@@ -1,6 +1,7 @@
 package tklite
 
 import (
+	"net/http"
 	"testing"
 )
 
@@ -36,5 +37,35 @@ func TestGetClientReusesSameClientForSamePath(t *testing.T) {
 
 	if first != second {
 		t.Fatal("same socket path must reuse the same client")
+	}
+}
+
+func TestExtractHeadersForwardsTKLiteSessionKey(t *testing.T) {
+	headers := http.Header{}
+	headers.Set("x-tklite-session-key", "codex:abc123")
+
+	got := extractHeaders(headers)
+
+	if got["x-tklite-session-key"] != "codex:abc123" {
+		t.Fatalf("x-tklite-session-key = %q", got["x-tklite-session-key"])
+	}
+}
+
+func TestExtractHeadersDoesNotForwardSensitiveHeaders(t *testing.T) {
+	headers := http.Header{}
+	headers.Set("x-api-key", "sk-secret")
+	headers.Set("authorization", "Bearer secret")
+	headers.Set("x-headroom-session-id", "raw-session")
+
+	got := extractHeaders(headers)
+
+	if _, ok := got["x-api-key"]; ok {
+		t.Fatal("x-api-key must not be forwarded")
+	}
+	if _, ok := got["authorization"]; ok {
+		t.Fatal("authorization must not be forwarded")
+	}
+	if _, ok := got["x-headroom-session-id"]; ok {
+		t.Fatal("x-headroom-session-id must not be forwarded")
 	}
 }

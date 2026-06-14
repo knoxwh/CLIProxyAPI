@@ -134,9 +134,9 @@ func (e *OpenAICompatExecutor) Execute(ctx context.Context, auth *cliproxyauth.A
 	// tklite cache optimization
 	switch endpoint {
 	case "/chat/completions":
-		translated = tklite.Optimize(ctx, e.cfg, "/v1/chat/completions", translated, opts.Headers)
+		translated = tklite.Optimize(ctx, e.cfg, "/v1/chat/completions", translated, CacheOptTKLiteHeaders(auth, req, opts.Headers))
 	case "/responses/compact":
-		translated = tklite.Optimize(ctx, e.cfg, "/v1/responses", translated, opts.Headers)
+		translated = tklite.Optimize(ctx, e.cfg, "/v1/responses", translated, CacheOptTKLiteHeaders(auth, req, opts.Headers))
 	}
 
 	url := strings.TrimSuffix(baseURL, "/") + endpoint
@@ -339,7 +339,7 @@ func (e *OpenAICompatExecutor) ExecuteStream(ctx context.Context, auth *cliproxy
 	reporter.SetTranslatedReasoningEffort(translated, to.String())
 
 	// tklite cache optimization (no endpoint filter needed: image and responses/compact paths already branched off)
-	translated = tklite.Optimize(ctx, e.cfg, "/v1/chat/completions", translated, opts.Headers)
+	translated = tklite.Optimize(ctx, e.cfg, "/v1/chat/completions", translated, CacheOptTKLiteHeaders(auth, req, opts.Headers))
 
 	url := strings.TrimSuffix(baseURL, "/") + "/chat/completions"
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(translated))

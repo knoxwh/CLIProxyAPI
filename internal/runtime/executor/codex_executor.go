@@ -823,7 +823,7 @@ func (e *CodexExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, re
 	reporter.SetTranslatedReasoningEffort(body, to.String())
 
 	// tklite cache optimization
-	body = tklite.Optimize(ctx, e.cfg, "/v1/responses", body, opts.Headers)
+	body = tklite.Optimize(ctx, e.cfg, "/v1/responses", body, CacheOptTKLiteHeaders(auth, req, opts.Headers))
 	body = CacheOptPostTKLite(auth, body, req)
 
 	url := strings.TrimSuffix(baseURL, "/") + "/responses"
@@ -994,7 +994,7 @@ func (e *CodexExecutor) executeCompact(ctx context.Context, auth *cliproxyauth.A
 	body = sanitizeOpenAIResponsesReasoningEncryptedContent(ctx, "codex executor", body)
 	reporter.SetTranslatedReasoningEffort(body, to.String())
 
-	body = tklite.Optimize(ctx, e.cfg, "/v1/responses", body, opts.Headers)
+	body = tklite.Optimize(ctx, e.cfg, "/v1/responses", body, CacheOptTKLiteHeaders(auth, req, opts.Headers))
 	body = CacheOptPostTKLite(auth, body, req)
 
 	url := strings.TrimSuffix(baseURL, "/") + "/responses/compact"
@@ -1109,7 +1109,7 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 	reporter.SetTranslatedReasoningEffort(body, to.String())
 
 	// tklite cache optimization
-	body = tklite.Optimize(ctx, e.cfg, "/v1/responses", body, opts.Headers)
+	body = tklite.Optimize(ctx, e.cfg, "/v1/responses", body, CacheOptTKLiteHeaders(auth, req, opts.Headers))
 	body = CacheOptPostTKLite(auth, body, req)
 
 	url := strings.TrimSuffix(baseURL, "/") + "/responses"

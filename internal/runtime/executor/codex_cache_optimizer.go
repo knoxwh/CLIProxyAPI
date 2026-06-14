@@ -12,6 +12,7 @@
 package executor
 
 import (
+	"net/http"
 	"strings"
 
 	"github.com/google/uuid"
@@ -142,4 +143,33 @@ func cacheOptAuthScope(auth *cliproxyauth.Auth) string {
 		return "auth-hash:" + uuid.NewSHA1(uuid.NameSpaceOID, []byte(apiKey+"\x00"+baseURL)).String()
 	}
 	return "auth:unknown"
+}
+
+// ─── Opaque tklite session key + header cloning ────────────────
+//
+// CacheOptTKLiteSessionKey derives a stable opaque session bucket
+// for tklite drift detection. Hashes the auth-scoped session key
+// so no raw auth ID, API key, base URL, or session ID leaks.
+//
+// CacheOptTKLiteHeaders clones request headers and injects the
+// sidecar-only x-tklite-session-key header. Use for every
+// tklite.Optimize() call to prevent opts.Headers mutation.
+
+func CacheOptTKLiteSessionKey(auth *cliproxyauth.Auth, req cliproxyexecutor.Request) string {
+	sessionKey := cacheOptSessionResponseKey(auth, req)
+	if strings.TrimSpace(sessionKey) == "" {
+		return ""
+	}
+	return "codex:" + uuid.NewSHA1(uuid.NameSpaceOID, []byte(sessionKey)).String()
+}
+
+func CacheOptTKLiteHeaders(auth *cliproxyauth.Auth, req cliproxyexecutor.Request, headers http.Header) http.Header {
+	cloned := headers.Clone()
+	if cloned == nil {
+		cloned = http.Header{}
+	}
+	if sessionKey := CacheOptTKLiteSessionKey(auth, req); sessionKey != "" {
+		cloned.Set("x-tklite-session-key", sessionKey)
+	}
+	return cloned
 }

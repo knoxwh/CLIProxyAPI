@@ -73,13 +73,14 @@ func Optimize(ctx context.Context, cfg *config.Config, endpoint string, body []b
 // ── Header forwarding ─────────────────────────────────────────────────────
 
 // forwardHeaders lists headers relevant to tklite optimization.
-// Secrets (x-api-key) and session identifiers (x-headroom-session-id)
-// are not forwarded to the sidecar.
+// Secrets (x-api-key, authorization) and public session identifiers
+// (x-headroom-session-id) are not forwarded to the sidecar.
 var forwardHeaders = []string{
 	"anthropic-beta",
 	"x-headroom-bypass",
 	"x-client",
 	"x-request-id",
+	"x-tklite-session-key",
 }
 
 func extractHeaders(h http.Header) map[string]string {
