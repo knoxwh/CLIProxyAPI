@@ -214,6 +214,9 @@ func (e *CodexWebsocketsExecutor) Execute(ctx context.Context, auth *cliproxyaut
 		body = ensureImageGenerationTool(body, baseModel, auth)
 	}
 	body = sanitizeOpenAIResponsesReasoningEncryptedContent(ctx, "codex websockets executor", body)
+	// Apply cache optimization: store + previous_response_id for API key auth,
+	// store=false + prompt_cache_retention deletion for OAuth.
+	body = CacheOptPostTKLite(auth, body, req)
 
 	httpURL := strings.TrimSuffix(baseURL, "/") + "/responses"
 	wsURL, err := buildCodexResponsesWebsocketURL(httpURL)
@@ -224,6 +227,14 @@ func (e *CodexWebsocketsExecutor) Execute(ctx context.Context, auth *cliproxyaut
 	body, wsHeaders, errPromptCache := applyCodexPromptCacheHeadersWithContext(ctx, from, req, body)
 	if errPromptCache != nil {
 		return resp, errPromptCache
+	}
+	// Resolve cache key: preserve stable key for API key auth, use proposed ID for OAuth.
+	existingCacheKey := gjson.GetBytes(body, "prompt_cache_key").String()
+	resolvedKey := CacheOptResolveCacheKey(auth, body, existingCacheKey)
+	if resolvedKey != existingCacheKey {
+		body, _ = sjson.SetBytes(body, "prompt_cache_key", resolvedKey)
+		setHeaderCasePreserved(wsHeaders, "session_id", resolvedKey)
+		wsHeaders.Set("Conversation_id", resolvedKey)
 	}
 	clientBody := body
 	var identityState codexIdentityConfuseState
@@ -384,6 +395,8 @@ func (e *CodexWebsocketsExecutor) Execute(ctx context.Context, auth *cliproxyaut
 			if detail, ok := helps.ParseCodexUsage(payload); ok {
 				reporter.Publish(ctx, detail)
 			}
+			// Store response.id for next-turn previous_response_id chaining (API key auth only).
+			CacheOptStoreResponseID(auth, req, payload)
 			var param any
 			clientPayload := applyCodexIdentityExposeResponsePayload(payload, identityState)
 			out := sdktranslator.TranslateNonStream(ctx, to, responseFormat, req.Model, originalPayload, clientBody, clientPayload, &param)
@@ -433,6 +446,9 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 		body = ensureImageGenerationTool(body, baseModel, auth)
 	}
 	body = sanitizeOpenAIResponsesReasoningEncryptedContent(ctx, "codex websockets executor", body)
+	// Apply cache optimization: store + previous_response_id for API key auth,
+	// store=false + prompt_cache_retention deletion for OAuth.
+	body = CacheOptPostTKLite(auth, body, req)
 
 	httpURL := strings.TrimSuffix(baseURL, "/") + "/responses"
 	wsURL, err := buildCodexResponsesWebsocketURL(httpURL)
@@ -443,6 +459,14 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 	body, wsHeaders, errPromptCache := applyCodexPromptCacheHeadersWithContext(ctx, from, req, body)
 	if errPromptCache != nil {
 		return nil, errPromptCache
+	}
+	// Resolve cache key: preserve stable key for API key auth, use proposed ID for OAuth.
+	existingCacheKey := gjson.GetBytes(body, "prompt_cache_key").String()
+	resolvedKey := CacheOptResolveCacheKey(auth, body, existingCacheKey)
+	if resolvedKey != existingCacheKey {
+		body, _ = sjson.SetBytes(body, "prompt_cache_key", resolvedKey)
+		setHeaderCasePreserved(wsHeaders, "session_id", resolvedKey)
+		wsHeaders.Set("Conversation_id", resolvedKey)
 	}
 	clientBody := body
 	var identityState codexIdentityConfuseState
@@ -658,6 +682,8 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 					if detail, ok := helps.ParseCodexUsage(payload); ok {
 						reporter.Publish(ctx, detail)
 					}
+					// Store response.id for next-turn previous_response_id chaining (API key auth only).
+					CacheOptStoreResponseID(auth, req, payload)
 				}
 				if !send(cliproxyexecutor.StreamChunk{Payload: clientPayload}) {
 					terminateReason = "context_done"
@@ -676,6 +702,8 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 				if detail, ok := helps.ParseCodexUsage(payload); ok {
 					reporter.Publish(ctx, detail)
 				}
+				// Store response.id for next-turn previous_response_id chaining (API key auth only).
+				CacheOptStoreResponseID(auth, req, payload)
 			}
 
 			clientPayload = applyCodexIdentityExposeResponsePayload(payload, identityState)
