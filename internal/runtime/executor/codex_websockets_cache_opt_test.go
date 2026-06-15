@@ -3,8 +3,11 @@ package executor
 import (
 	"bytes"
 	"context"
+	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"testing"
 	"time"
 
@@ -15,6 +18,7 @@ import (
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v7/sdk/translator"
 	"github.com/tidwall/gjson"
+	"github.com/tidwall/sjson"
 )
 
 func TestCodexWebsocketsAPIKeyAuthSetsStoreTrue(t *testing.T) {
@@ -47,7 +51,7 @@ func TestCodexWebsocketsAPIKeyAuthSetsStoreTrue(t *testing.T) {
 	auth := &cliproxyauth.Auth{ID: "auth-store-test", Attributes: map[string]string{"api_key": "sk-test", "base_url": server.URL}}
 	req := cliproxyexecutor.Request{
 		Model:   "gpt-5-codex",
-		Payload: []byte(`{"model":"gpt-5-codex","input":[{"type":"message","role":"user","content":"hello"}]}`),
+		Payload: []byte(`{"model":"gpt-5-codex","stream_options":{"include_usage":true},"input":[{"type":"message","role":"user","content":"hello"}]}`),
 	}
 	opts := cliproxyexecutor.Options{SourceFormat: sdktranslator.FromString("codex")}
 
@@ -59,6 +63,10 @@ func TestCodexWebsocketsAPIKeyAuthSetsStoreTrue(t *testing.T) {
 	case payload := <-capturedPayload:
 		if got := gjson.GetBytes(payload, "store").Bool(); !got {
 			t.Fatalf("store = %v, want true; payload=%s", got, payload)
+		}
+		// stream_options must be stripped from WS payload
+		if gjson.GetBytes(payload, "stream_options").Exists() {
+			t.Fatalf("stream_options must not be in WS payload; payload=%s", payload)
 		}
 	case <-time.After(5 * time.Second):
 		t.Fatal("timed out waiting for upstream websocket payload")
@@ -103,7 +111,7 @@ func TestCodexWebsocketsOAuthAuthSetsStoreFalse(t *testing.T) {
 	}
 	req := cliproxyexecutor.Request{
 		Model:   "gpt-5-codex",
-		Payload: []byte(`{"model":"gpt-5-codex","input":[{"type":"message","role":"user","content":"hello"}]}`),
+		Payload: []byte(`{"model":"gpt-5-codex","stream_options":{"include_usage":true},"input":[{"type":"message","role":"user","content":"hello"}]}`),
 	}
 	opts := cliproxyexecutor.Options{SourceFormat: sdktranslator.FromString("codex")}
 
@@ -124,6 +132,167 @@ func TestCodexWebsocketsOAuthAuthSetsStoreFalse(t *testing.T) {
 		if gjson.GetBytes(payload, "prompt_cache_retention").Exists() {
 			t.Fatalf("OAuth path must not have prompt_cache_retention; payload=%s", payload)
 		}
+		// stream_options must be stripped from WS payload
+		if gjson.GetBytes(payload, "stream_options").Exists() {
+			t.Fatalf("stream_options must not be in WS payload; payload=%s", payload)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for upstream websocket payload")
+	}
+}
+
+func startCodexWebsocketsTestTKLite(t *testing.T) (string, <-chan string) {
+	t.Helper()
+
+	socketFile, errTemp := os.CreateTemp("/tmp", "cliproxy-tklite-*.sock")
+	if errTemp != nil {
+		t.Fatalf("create tklite socket path: %v", errTemp)
+	}
+	socketPath := socketFile.Name()
+	_ = socketFile.Close()
+	_ = os.Remove(socketPath)
+	t.Cleanup(func() { _ = os.Remove(socketPath) })
+
+	listener, errListen := net.Listen("unix", socketPath)
+	if errListen != nil {
+		t.Fatalf("listen tklite socket: %v", errListen)
+	}
+
+	tkliteSawSessionKey := make(chan string, 2)
+	tkliteServer := &http.Server{Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, errRead := io.ReadAll(r.Body)
+		if errRead != nil {
+			t.Fatalf("read tklite request body: %v", errRead)
+		}
+		tkliteSawSessionKey <- r.Header.Get("x-tklite-session-key")
+		optimized, _ := sjson.SetBytes(body, "tklite_marker", true)
+		_, _ = w.Write(optimized)
+	})}
+	go func() { _ = tkliteServer.Serve(listener) }()
+	t.Cleanup(func() {
+		_ = tkliteServer.Close()
+		_ = listener.Close()
+	})
+
+	return socketPath, tkliteSawSessionKey
+}
+
+func TestCodexWebsocketsAppliesTKLiteBeforeUpstream(t *testing.T) {
+	socketPath, tkliteSawSessionKey := startCodexWebsocketsTestTKLite(t)
+	upgrader := websocket.Upgrader{CheckOrigin: func(*http.Request) bool { return true }}
+	capturedPayload := make(chan []byte, 1)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := upgrader.Upgrade(w, r, nil)
+		if err != nil {
+			t.Fatalf("upgrade websocket: %v", err)
+		}
+		defer func() { _ = conn.Close() }()
+
+		_, payload, err := conn.ReadMessage()
+		if err != nil {
+			t.Fatalf("read upstream websocket message: %v", err)
+		}
+		capturedPayload <- bytes.Clone(payload)
+		completed := []byte(`{"type":"response.completed","response":{"id":"resp-tklite-test","output":[],"usage":{"input_tokens":0,"output_tokens":0,"total_tokens":0}}}`)
+		if errWrite := conn.WriteMessage(websocket.TextMessage, completed); errWrite != nil {
+			t.Fatalf("write completed websocket message: %v", errWrite)
+		}
+	}))
+	defer server.Close()
+
+	cfg := &config.Config{SDKConfig: config.SDKConfig{DisableImageGeneration: config.DisableImageGenerationAll}}
+	cfg.TKLite.Enabled = true
+	cfg.TKLite.Socket = socketPath
+	cfg.TKLite.RequestTimeoutSeconds = 1
+	exec := NewCodexWebsocketsExecutor(cfg)
+	auth := &cliproxyauth.Auth{ID: "auth-tklite-test", Attributes: map[string]string{"api_key": "sk-test", "base_url": server.URL}}
+	req := cliproxyexecutor.Request{
+		Model:   "gpt-5-codex",
+		Payload: []byte(`{"model":"gpt-5-codex","metadata":{"user_id":"{\"session_id\":\"tklite-session\"}"},"input":[{"type":"message","role":"user","content":"hello"}]}`),
+	}
+	opts := cliproxyexecutor.Options{SourceFormat: sdktranslator.FromString("codex")}
+
+	if _, err := exec.Execute(context.Background(), auth, req, opts); err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+
+	select {
+	case sessionKey := <-tkliteSawSessionKey:
+		if sessionKey == "" {
+			t.Fatal("tklite did not receive x-tklite-session-key")
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for tklite request")
+	}
+	select {
+	case payload := <-capturedPayload:
+		if !gjson.GetBytes(payload, "tklite_marker").Bool() {
+			t.Fatalf("upstream payload was not optimized by tklite; payload=%s", payload)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for upstream websocket payload")
+	}
+}
+
+func TestCodexWebsocketsExecuteStreamAppliesTKLiteBeforeUpstream(t *testing.T) {
+	socketPath, tkliteSawSessionKey := startCodexWebsocketsTestTKLite(t)
+	upgrader := websocket.Upgrader{CheckOrigin: func(*http.Request) bool { return true }}
+	capturedPayload := make(chan []byte, 1)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := upgrader.Upgrade(w, r, nil)
+		if err != nil {
+			t.Fatalf("upgrade websocket: %v", err)
+		}
+		defer func() { _ = conn.Close() }()
+
+		_, payload, err := conn.ReadMessage()
+		if err != nil {
+			t.Fatalf("read upstream websocket message: %v", err)
+		}
+		capturedPayload <- bytes.Clone(payload)
+		delta := []byte(`{"type":"response.output_text.delta","delta":"hello"}`)
+		completed := []byte(`{"type":"response.completed","response":{"id":"resp-stream-tklite-test","output":[],"usage":{"input_tokens":0,"output_tokens":0,"total_tokens":0}}}`)
+		if errWrite := conn.WriteMessage(websocket.TextMessage, delta); errWrite != nil {
+			t.Fatalf("write delta websocket message: %v", errWrite)
+		}
+		if errWrite := conn.WriteMessage(websocket.TextMessage, completed); errWrite != nil {
+			t.Fatalf("write completed websocket message: %v", errWrite)
+		}
+	}))
+	defer server.Close()
+
+	cfg := &config.Config{SDKConfig: config.SDKConfig{DisableImageGeneration: config.DisableImageGenerationAll}}
+	cfg.TKLite.Enabled = true
+	cfg.TKLite.Socket = socketPath
+	cfg.TKLite.RequestTimeoutSeconds = 1
+	exec := NewCodexWebsocketsExecutor(cfg)
+	auth := &cliproxyauth.Auth{ID: "auth-stream-tklite-test", Attributes: map[string]string{"api_key": "sk-test", "base_url": server.URL}}
+	req := cliproxyexecutor.Request{
+		Model:   "gpt-5-codex",
+		Payload: []byte(`{"model":"gpt-5-codex","metadata":{"user_id":"{\"session_id\":\"stream-tklite-session\"}"},"input":[{"type":"message","role":"user","content":"hello"}]}`),
+	}
+	opts := cliproxyexecutor.Options{SourceFormat: sdktranslator.FromString("codex")}
+
+	result, err := exec.ExecuteStream(context.Background(), auth, req, opts)
+	if err != nil {
+		t.Fatalf("ExecuteStream() error = %v", err)
+	}
+	for range result.Chunks {
+	}
+
+	select {
+	case sessionKey := <-tkliteSawSessionKey:
+		if sessionKey == "" {
+			t.Fatal("tklite did not receive x-tklite-session-key")
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for tklite request")
+	}
+	select {
+	case payload := <-capturedPayload:
+		if !gjson.GetBytes(payload, "tklite_marker").Bool() {
+			t.Fatalf("upstream payload was not optimized by tklite; payload=%s", payload)
+		}
 	case <-time.After(5 * time.Second):
 		t.Fatal("timed out waiting for upstream websocket payload")
 	}
@@ -138,7 +307,6 @@ func TestCodexWebsocketsAPIKeyAuthInjectsPreviousResponseIDFromSessionMap(t *tes
 			t.Fatalf("upgrade websocket: %v", err)
 		}
 		defer func() { _ = conn.Close() }()
-
 		msgType, payload, err := conn.ReadMessage()
 		if err != nil {
 			t.Fatalf("read upstream websocket message: %v", err)
@@ -147,7 +315,6 @@ func TestCodexWebsocketsAPIKeyAuthInjectsPreviousResponseIDFromSessionMap(t *tes
 			t.Fatalf("message type = %d, want text", msgType)
 		}
 		capturedPayload <- bytes.Clone(payload)
-
 		completed := []byte(`{"type":"response.completed","response":{"id":"resp-new-turn","output":[],"usage":{"input_tokens":0,"output_tokens":0,"total_tokens":0}}}`)
 		if errWrite := conn.WriteMessage(websocket.TextMessage, completed); errWrite != nil {
 			t.Fatalf("write completed websocket message: %v", errWrite)
@@ -189,10 +356,10 @@ func TestCodexWebsocketsAPIKeyAuthInjectsPreviousResponseIDFromSessionMap(t *tes
 	}
 }
 
-func TestCodexWebsocketsClientPreviousResponseIDNotOverridden(t *testing.T) {
-	// Pre-populate session map with a different response ID.
-	sessionKey := "auth-id:auth-override-test:" + extractClaudeCodeSessionIDForCodexReplay([]byte(`{"metadata":{"user_id":"{\"session_id\":\"override-session-1\"}"}}`))
-	helps.SetSessionResponseID(sessionKey, "resp-from-map")
+func TestCodexWebsocketsClientPreviousResponseIDDeletedAndReplacedBySessionMap(t *testing.T) {
+	// WS path now deletes client-provided previous_response_id before CacheOptPostTKLite
+	// (matching HTTP path behavior). Then CacheOptPostTKLite re-injects from session map.
+	// So the session map value should be used, NOT the client-provided value.
 
 	upgrader := websocket.Upgrader{CheckOrigin: func(*http.Request) bool { return true }}
 	capturedPayload := make(chan []byte, 1)
@@ -202,7 +369,6 @@ func TestCodexWebsocketsClientPreviousResponseIDNotOverridden(t *testing.T) {
 			t.Fatalf("upgrade websocket: %v", err)
 		}
 		defer func() { _ = conn.Close() }()
-
 		msgType, payload, err := conn.ReadMessage()
 		if err != nil {
 			t.Fatalf("read upstream websocket message: %v", err)
@@ -211,8 +377,7 @@ func TestCodexWebsocketsClientPreviousResponseIDNotOverridden(t *testing.T) {
 			t.Fatalf("message type = %d, want text", msgType)
 		}
 		capturedPayload <- bytes.Clone(payload)
-
-		completed := []byte(`{"type":"response.completed","response":{"id":"resp-client-override","output":[],"usage":{"input_tokens":0,"output_tokens":0,"total_tokens":0}}}`)
+		completed := []byte(`{"type":"response.completed","response":{"id":"resp-replaced","output":[],"usage":{"input_tokens":0,"output_tokens":0,"total_tokens":0}}}`)
 		if errWrite := conn.WriteMessage(websocket.TextMessage, completed); errWrite != nil {
 			t.Fatalf("write completed websocket message: %v", errWrite)
 		}
@@ -221,21 +386,29 @@ func TestCodexWebsocketsClientPreviousResponseIDNotOverridden(t *testing.T) {
 
 	exec := NewCodexWebsocketsExecutor(&config.Config{SDKConfig: config.SDKConfig{DisableImageGeneration: config.DisableImageGenerationAll}})
 	auth := &cliproxyauth.Auth{ID: "auth-override-test", Attributes: map[string]string{"api_key": "sk-test", "base_url": server.URL}}
-	// Client explicitly provides previous_response_id — should NOT be overridden by session map.
 	req := cliproxyexecutor.Request{
 		Model:   "gpt-5-codex",
 		Payload: []byte(`{"model":"gpt-5-codex","previous_response_id":"resp-client-provided","metadata":{"user_id":"{\"session_id\":\"override-session-1\"}"},"input":[{"type":"message","role":"user","content":"hello"}]}`),
 	}
-	opts := cliproxyexecutor.Options{SourceFormat: sdktranslator.FromString("codex")}
 
+	// Pre-populate session map — this value should win over client-provided one.
+	sessionKey := cacheOptSessionResponseKey(auth, req)
+	if sessionKey == "" {
+		t.Skip("no session key derivable from this payload")
+	}
+	helps.SetSessionResponseID(sessionKey, "resp-from-map")
+
+	opts := cliproxyexecutor.Options{SourceFormat: sdktranslator.FromString("codex")}
 	if _, err := exec.Execute(context.Background(), auth, req, opts); err != nil {
 		t.Fatalf("Execute() error = %v", err)
 	}
 
 	select {
 	case payload := <-capturedPayload:
-		if got := gjson.GetBytes(payload, "previous_response_id").String(); got != "resp-client-provided" {
-			t.Fatalf("client previous_response_id was overridden: got %s, want resp-client-provided; payload=%s", got, payload)
+		// Client-provided "resp-client-provided" should be deleted,
+		// then session map value "resp-from-map" should be injected.
+		if got := gjson.GetBytes(payload, "previous_response_id").String(); got != "resp-from-map" {
+			t.Fatalf("previous_response_id = %s, want resp-from-map (session map value, not client value); payload=%s", got, payload)
 		}
 	case <-time.After(5 * time.Second):
 		t.Fatal("timed out waiting for upstream websocket payload")
