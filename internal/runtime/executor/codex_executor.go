@@ -61,11 +61,11 @@ func collectCodexOutputItemDone(eventData []byte, outputItemsByIndex map[int64][
 }
 
 func patchCodexCompletedOutput(eventData []byte, outputItemsByIndex map[int64][]byte, outputItemsFallback [][]byte) []byte {
-	outputResult := gjson.GetBytes(eventData, "response.output")
-	shouldPatchOutput := (!outputResult.Exists() || !outputResult.IsArray() || len(outputResult.Array()) == 0) && (len(outputItemsByIndex) > 0 || len(outputItemsFallback) > 0)
-	if !shouldPatchOutput {
+	if len(outputItemsByIndex) == 0 && len(outputItemsFallback) == 0 {
 		return eventData
 	}
+
+	outputResult := gjson.GetBytes(eventData, "response.output")
 
 	indexes := make([]int64, 0, len(outputItemsByIndex))
 	for idx := range outputItemsByIndex {
@@ -80,6 +80,13 @@ func patchCodexCompletedOutput(eventData []byte, outputItemsByIndex map[int64][]
 		items = append(items, outputItemsByIndex[idx])
 	}
 	items = append(items, outputItemsFallback...)
+
+	// Skip patching only if response.output is already a complete array
+	// covering all collected items. This preserves reasoning output items
+	// that the upstream may have omitted from the completed event.
+	if outputResult.Exists() && outputResult.IsArray() && len(outputResult.Array()) >= len(items) {
+		return eventData
+	}
 
 	outputArray := []byte("[]")
 	if len(items) > 0 {
