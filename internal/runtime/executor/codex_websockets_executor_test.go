@@ -39,7 +39,7 @@ func TestBuildCodexWebsocketRequestBodyPreservesPreviousResponseID(t *testing.T)
 	}
 }
 
-func TestCodexWebsocketsExecuteStripsClientPreviousResponseID(t *testing.T) {
+func TestCodexWebsocketsExecutePreservesPreviousResponseIDUpstream(t *testing.T) {
 	upgrader := websocket.Upgrader{CheckOrigin: func(*http.Request) bool { return true }}
 	capturedPayload := make(chan []byte, 1)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -85,11 +85,8 @@ func TestCodexWebsocketsExecuteStripsClientPreviousResponseID(t *testing.T) {
 		if got := gjson.GetBytes(payload, "type").String(); got != "response.create" {
 			t.Fatalf("upstream type = %s, want response.create; payload=%s", got, payload)
 		}
-		// Client-provided previous_response_id is deleted before CacheOptPostTKLite
-		// (matching HTTP path behavior). Without session map data, it is not re-injected.
-		// This prevents stale or invalid client-provided IDs from reaching upstream.
-		if gjson.GetBytes(payload, "previous_response_id").Exists() {
-			t.Fatalf("client-provided previous_response_id must be stripped when no session map data; payload=%s", payload)
+		if got := gjson.GetBytes(payload, "previous_response_id").String(); got != "resp-1" {
+			t.Fatalf("upstream previous_response_id = %s, want resp-1; payload=%s", got, payload)
 		}
 	case <-time.After(5 * time.Second):
 		t.Fatal("timed out waiting for upstream websocket payload")
