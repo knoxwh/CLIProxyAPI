@@ -169,6 +169,18 @@ func SetSessionResponseID(sessionKey string, responseID string) {
 	sessionResponseMu.Unlock()
 }
 
+// DeleteSessionResponseID removes a stale session→response_id entry.
+// Called when upstream returns previous_response_not_found or similar errors.
+func DeleteSessionResponseID(sessionKey string) {
+	if sessionKey == "" {
+		return
+	}
+	codexCacheCleanupOnce.Do(startCodexCacheCleanup)
+	sessionResponseMu.Lock()
+	delete(sessionResponseMap, sessionKey)
+	sessionResponseMu.Unlock()
+}
+
 // purgeExpiredSessionResponses removes expired session→response_id entries.
 // Called by the existing cleanup goroutine.
 func purgeExpiredSessionResponses() {

@@ -45,15 +45,23 @@ func isAPIKeyAuth(auth *cliproxyauth.Auth) bool {
 //   - Override store=false (chatgpt.com requires this)
 //   - Delete prompt_cache_retention (tklite re-injected it after trunk
 //     deleted it; chatgpt.com rejects this field)
-func CacheOptPostTKLite(auth *cliproxyauth.Auth, body []byte, req cliproxyexecutor.Request) []byte {
+func CacheOptPostTKLite(auth *cliproxyauth.Auth, body []byte, req cliproxyexecutor.Request, originalPayloadSource []byte) []byte {
 	if isAPIKeyAuth(auth) {
 		// ── API key path: enable conversation chaining ──
 		body, _ = sjson.SetBytes(body, "store", true)
 
-		// Inject previous_response_id from session map.
-		// Trunk code deleted this field before tklite (safe for OAuth),
-		// so we re-inject it here for the API key path.
-		if !gjson.GetBytes(body, "previous_response_id").Exists() {
+		// Inject previous_response_id only when the client did not
+		// explicitly provide a non-empty one. originalPayloadSource is the raw
+		// client payload before trunk deletes the field for OAuth safety.
+		pr := gjson.GetBytes(originalPayloadSource, "previous_response_id")
+		if pr.Exists() {
+			if clientValue := strings.TrimSpace(pr.String()); clientValue != "" {
+				body, _ = sjson.SetBytes(body, "previous_response_id", clientValue)
+			}
+			// Empty client value is treated as "no explicit intent" and falls
+			// through to the session-cache fallback below.
+		}
+		if gjson.GetBytes(body, "previous_response_id").String() == "" {
 			sessionKey := cacheOptSessionResponseKey(auth, req)
 			if sessionKey != "" {
 				if lastRespID, ok := helps.GetSessionResponseID(sessionKey); ok && lastRespID != "" {
@@ -69,6 +77,9 @@ func CacheOptPostTKLite(auth *cliproxyauth.Auth, body []byte, req cliproxyexecut
 		// tklite re-injected prompt_cache_retention after trunk deleted it.
 		// chatgpt.com rejects this field.
 		body, _ = sjson.DeleteBytes(body, "prompt_cache_retention")
+		// Defensive delete: keep chatgpt.com compatible even if future
+		// upstream changes leave this field in the body.
+		body, _ = sjson.DeleteBytes(body, "previous_response_id")
 	}
 	return body
 }

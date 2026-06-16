@@ -842,7 +842,7 @@ func (e *CodexExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, re
 
 	// tklite cache optimization
 	body = tklite.Optimize(ctx, e.cfg, "/v1/responses", body, CacheOptTKLiteHeaders(auth, req, opts.Headers))
-	body = CacheOptPostTKLite(auth, body, req)
+	body = CacheOptPostTKLite(auth, body, req, originalPayloadSource)
 
 	url := strings.TrimSuffix(baseURL, "/") + "/responses"
 	var identityState codexIdentityConfuseState
@@ -885,6 +885,14 @@ func (e *CodexExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, re
 	if httpResp.StatusCode < 200 || httpResp.StatusCode >= 300 {
 		b, _ := io.ReadAll(httpResp.Body)
 		b = applyCodexIdentityConfuseResponsePayload(b, identityState)
+		// Clear stale previous_response_id so the next request in this
+		// session does not re-inject a deleted upstream response.
+		if code, _, ok := codexStatusErrorClassification(httpResp.StatusCode, b); ok && code == "previous_response_not_found" {
+			if sessionKey := cacheOptSessionResponseKey(auth, req); sessionKey != "" {
+				helps.DeleteSessionResponseID(sessionKey)
+				helps.LogWithRequestID(ctx).Debugf("cleared stale response_id for session (error_code=%s)", code)
+			}
+		}
 		if errClearReplay := clearCodexReasoningReplayOnInvalidSignature(ctx, replayScope, httpResp.StatusCode, b); errClearReplay != nil {
 			return resp, errClearReplay
 		}
@@ -1017,7 +1025,7 @@ func (e *CodexExecutor) executeCompact(ctx context.Context, auth *cliproxyauth.A
 	reporter.SetTranslatedReasoningEffort(body, to.String())
 
 	body = tklite.Optimize(ctx, e.cfg, "/v1/responses", body, CacheOptTKLiteHeaders(auth, req, opts.Headers))
-	body = CacheOptPostTKLite(auth, body, req)
+	body = CacheOptPostTKLite(auth, body, req, originalPayloadSource)
 
 	url := strings.TrimSuffix(baseURL, "/") + "/responses/compact"
 	var identityState codexIdentityConfuseState
@@ -1060,6 +1068,14 @@ func (e *CodexExecutor) executeCompact(ctx context.Context, auth *cliproxyauth.A
 	if httpResp.StatusCode < 200 || httpResp.StatusCode >= 300 {
 		b, _ := io.ReadAll(httpResp.Body)
 		b = applyCodexIdentityConfuseResponsePayload(b, identityState)
+		// Clear stale previous_response_id so the next request in this
+		// session does not re-inject a deleted upstream response.
+		if code, _, ok := codexStatusErrorClassification(httpResp.StatusCode, b); ok && code == "previous_response_not_found" {
+			if sessionKey := cacheOptSessionResponseKey(auth, req); sessionKey != "" {
+				helps.DeleteSessionResponseID(sessionKey)
+				helps.LogWithRequestID(ctx).Debugf("cleared stale response_id for session (error_code=%s)", code)
+			}
+		}
 		helps.AppendAPIResponseChunk(ctx, e.cfg, b)
 		helps.LogWithRequestID(ctx).Debugf("request error, error status: %d, error message: %s", httpResp.StatusCode, helps.SummarizeErrorBody(httpResp.Header.Get("Content-Type"), b))
 		err = newCodexStatusErr(httpResp.StatusCode, b)
@@ -1135,7 +1151,7 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 
 	// tklite cache optimization
 	body = tklite.Optimize(ctx, e.cfg, "/v1/responses", body, CacheOptTKLiteHeaders(auth, req, opts.Headers))
-	body = CacheOptPostTKLite(auth, body, req)
+	body = CacheOptPostTKLite(auth, body, req, originalPayloadSource)
 
 	url := strings.TrimSuffix(baseURL, "/") + "/responses"
 	var identityState codexIdentityConfuseState
@@ -1181,6 +1197,14 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 			return nil, readErr
 		}
 		data = applyCodexIdentityConfuseResponsePayload(data, identityState)
+		// Clear stale previous_response_id so the next request in this
+		// session does not re-inject a deleted upstream response.
+		if code, _, ok := codexStatusErrorClassification(httpResp.StatusCode, data); ok && code == "previous_response_not_found" {
+			if sessionKey := cacheOptSessionResponseKey(auth, req); sessionKey != "" {
+				helps.DeleteSessionResponseID(sessionKey)
+				helps.LogWithRequestID(ctx).Debugf("cleared stale response_id for session (error_code=%s)", code)
+			}
+		}
 		if errClearReplay := clearCodexReasoningReplayOnInvalidSignature(ctx, replayScope, httpResp.StatusCode, data); errClearReplay != nil {
 			return nil, errClearReplay
 		}
