@@ -253,6 +253,7 @@ func (e *ClaudeExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 
 	// tklite cache optimization (after existing cache_control logic; tklite detects existing markers and skips placement)
 	body = tklite.Optimize(ctx, e.cfg, "/v1/messages", body, CacheOptTKLiteHeaders(auth, req, opts.Headers))
+	body, _ = sjson.DeleteBytes(body, "prompt_cache_retention")
 
 	// Extract betas from body and convert to header
 	var extraBetas []string
@@ -440,6 +441,7 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 
 	// tklite cache optimization (after existing cache_control logic; tklite detects existing markers and skips placement)
 	body = tklite.Optimize(ctx, e.cfg, "/v1/messages", body, CacheOptTKLiteHeaders(auth, req, opts.Headers))
+	body, _ = sjson.DeleteBytes(body, "prompt_cache_retention")
 
 	// Extract betas from body and convert to header
 	var extraBetas []string

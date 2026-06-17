@@ -168,6 +168,21 @@ func TestOAuthPathDeletesPreviousResponseID(t *testing.T) {
 	}
 }
 
+func TestCacheOptPostTKLiteDeletesPromptCacheRetentionForAPIKey(t *testing.T) {
+	body := []byte(`{"prompt_cache_retention":"24h","input":[{"role":"user","content":"hi"}]}`)
+	auth := &cliproxyauth.Auth{Attributes: map[string]string{"api_key": "sk-test"}}
+	req := cliproxyexecutor.Request{}
+
+	result := CacheOptPostTKLite(auth, body, req, body)
+
+	if gjson.GetBytes(result, "prompt_cache_retention").Exists() {
+		t.Fatal("API key path should delete prompt_cache_retention")
+	}
+	if gjson.GetBytes(result, "store").Bool() != true {
+		t.Fatal("API key path should still set store=true")
+	}
+}
+
 func TestCacheOptFallsBackToSessionCache(t *testing.T) {
 	body := []byte(`{"input":[{"role":"user","content":"hi"}]}`)
 	auth := &cliproxyauth.Auth{

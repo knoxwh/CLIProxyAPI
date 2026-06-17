@@ -37,15 +37,19 @@ func isAPIKeyAuth(auth *cliproxyauth.Auth) bool {
 //
 // Called after tklite.Optimize() in Execute and ExecuteStream.
 //
+// All paths:
+//   - Delete prompt_cache_retention (tklite may re-inject it after trunk
+//     deleted it; upstream APIs reject this field)
+//
 // API key path (isAPIKey=true, muskapi upstream):
 //   - Set store=true (enables response storage → previous_response_id)
 //   - Inject previous_response_id from session map (conversation chaining)
 //
 // OAuth path (isAPIKey=false, chatgpt.com upstream):
 //   - Override store=false (chatgpt.com requires this)
-//   - Delete prompt_cache_retention (tklite re-injected it after trunk
-//     deleted it; chatgpt.com rejects this field)
 func CacheOptPostTKLite(auth *cliproxyauth.Auth, body []byte, req cliproxyexecutor.Request, originalPayloadSource []byte) []byte {
+	body, _ = sjson.DeleteBytes(body, "prompt_cache_retention")
+
 	if isAPIKeyAuth(auth) {
 		// ── API key path: enable conversation chaining ──
 		body, _ = sjson.SetBytes(body, "store", true)
@@ -74,9 +78,6 @@ func CacheOptPostTKLite(auth *cliproxyauth.Auth, body []byte, req cliproxyexecut
 		// tklite injects store=true for Responses API shape,
 		// but chatgpt.com requires store=false.
 		body, _ = sjson.SetBytes(body, "store", false)
-		// tklite re-injected prompt_cache_retention after trunk deleted it.
-		// chatgpt.com rejects this field.
-		body, _ = sjson.DeleteBytes(body, "prompt_cache_retention")
 		// Defensive delete: keep chatgpt.com compatible even if future
 		// upstream changes leave this field in the body.
 		body, _ = sjson.DeleteBytes(body, "previous_response_id")
