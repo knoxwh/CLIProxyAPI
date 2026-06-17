@@ -469,18 +469,13 @@ func ConvertCodexResponseToOpenAINonStream(_ context.Context, _ string, original
 		}
 	}
 
-	// Extract and set the finish reason based on status
-	if statusResult := responseResult.Get("status"); statusResult.Exists() {
-		status := statusResult.String()
-		if status == "completed" {
-			finishReason := "stop"
-			if len(toolCalls) > 0 {
-				finishReason = "tool_calls"
-			}
-			template, _ = sjson.SetBytes(template, "choices.0.finish_reason", finishReason)
-			template, _ = sjson.SetBytes(template, "choices.0.native_finish_reason", finishReason)
-		}
+	// Set the finish reason; a response.completed event is final.
+	finishReason := "stop"
+	if len(toolCalls) > 0 {
+		finishReason = "tool_calls"
 	}
+	template, _ = sjson.SetBytes(template, "choices.0.finish_reason", finishReason)
+	template, _ = sjson.SetBytes(template, "choices.0.native_finish_reason", finishReason)
 
 	return template
 }

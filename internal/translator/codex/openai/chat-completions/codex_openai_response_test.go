@@ -141,18 +141,23 @@ func TestConvertCodexResponseToOpenAI_StreamImageGenerationCallDoneEmitsDeltaIma
 func TestConvertCodexResponseToOpenAI_NonStreamImageGenerationCallAddsMessageImages(t *testing.T) {
 	ctx := context.Background()
 
-	raw := []byte(`{"type":"response.completed","response":{"id":"resp_123","created_at":1700000000,"model":"gpt-5.4","status":"completed","usage":{"input_tokens":1,"output_tokens":1,"total_tokens":2},"output":[{"type":"message","content":[{"type":"output_text","text":"ok"}]},{"type":"image_generation_call","output_format":"png","result":"aGVsbG8="}]}}`)
+	raw := []byte(`{"type":"response.completed","response":{"id":"resp_123","created_at":1700000000,"model":"gpt-5.4","usage":{"input_tokens":1,"output_tokens":1,"total_tokens":2},"output":[{"type":"message","content":[{"type":"output_text","text":"ok"}]},{"type":"image_generation_call","output_format":"png","result":"aGVsbG8="}]}}`)
 	out := ConvertCodexResponseToOpenAINonStream(ctx, "gpt-5.4", nil, nil, raw, nil)
 
 	gotURL := gjson.GetBytes(out, "choices.0.message.images.0.image_url.url").String()
 	if gotURL != "data:image/png;base64,aGVsbG8=" {
 		t.Fatalf("expected image url %q, got %q; chunk=%s", "data:image/png;base64,aGVsbG8=", gotURL, string(out))
 	}
+
+	gotFinishReason := gjson.GetBytes(out, "choices.0.finish_reason").String()
+	if gotFinishReason != "stop" {
+		t.Fatalf("expected finish_reason %q, got %q; resp=%s", "stop", gotFinishReason, string(out))
+	}
 }
 
 func TestConvertCodexResponseToOpenAI_NonStreamMultiMessageEmptyTrailingKeepsContent(t *testing.T) {
 	ctx := context.Background()
-	raw := []byte(`{"type":"response.completed","response":{"id":"resp_1","created_at":1700000000,"model":"gpt-5.5","status":"completed","usage":{"input_tokens":10,"output_tokens":5,"total_tokens":15},"output":[` +
+	raw := []byte(`{"type":"response.completed","response":{"id":"resp_1","created_at":1700000000,"model":"gpt-5.5","usage":{"input_tokens":10,"output_tokens":5,"total_tokens":15},"output":[` +
 		`{"type":"reasoning","summary":[{"type":"summary_text","text":"thinking"}]},` +
 		`{"type":"message","content":[{"type":"output_text","text":"the real answer"}]},` +
 		`{"type":"reasoning","summary":[{"type":"summary_text","text":"thinking again"}]},` +
