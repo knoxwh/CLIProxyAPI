@@ -172,7 +172,7 @@ func CacheOptTKLiteSessionKey(auth *cliproxyauth.Auth, req cliproxyexecutor.Requ
 	if strings.TrimSpace(sessionKey) == "" {
 		return ""
 	}
-	return "codex:" + uuid.NewSHA1(uuid.NameSpaceOID, []byte(sessionKey)).String()
+	return "cpa:" + uuid.NewSHA1(uuid.NameSpaceOID, []byte(sessionKey)).String()
 }
 
 func CacheOptTKLiteHeaders(auth *cliproxyauth.Auth, req cliproxyexecutor.Request, headers http.Header) http.Header {

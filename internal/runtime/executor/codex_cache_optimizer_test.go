@@ -35,7 +35,7 @@ func TestCacheOptTKLiteSessionKeyIsOpaque(t *testing.T) {
 			t.Fatalf("key leaks raw value %q: %q", raw, key)
 		}
 	}
-	if !strings.HasPrefix(key, "codex:") {
+	if !strings.HasPrefix(key, "cpa:") {
 		t.Fatalf("key prefix = %q", key)
 	}
 }
