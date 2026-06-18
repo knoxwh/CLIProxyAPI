@@ -2350,3 +2350,58 @@ func TestRestoreClaudeOAuthToolNamesFromStreamLine_MixedCaseWithPrefix(t *testin
 		t.Fatalf("Glob should be restored to glob, got: %s", string(out))
 	}
 }
+
+func TestValidateCacheControlTTL_NoWarningsOnValidTTLs(t *testing.T) {
+	body := []byte(`{"tools":[{"cache_control":{"type":"ephemeral","ttl":"5m"}}],"system":[{"cache_control":{"type":"ephemeral","ttl":"1h"}}]}`)
+	warnings := validateCacheControlTTL(body)
+	if len(warnings) != 0 {
+		t.Fatalf("expected no warnings, got %v", warnings)
+	}
+}
+
+func TestValidateCacheControlTTL_WarnsOnInvalidTTL(t *testing.T) {
+	// ttl value not in {5m, 1h, absent} → warning.
+	body := []byte(`{"tools":[{"cache_control":{"type":"ephemeral","ttl":"2h"}}]}`)
+	warnings := validateCacheControlTTL(body)
+	if len(warnings) == 0 {
+		t.Fatalf("expected warning for invalid ttl 2h, got none")
+	}
+}
+
+func TestValidateCacheControlTTL_IgnoresAbsentTTL(t *testing.T) {
+	// No ttl field → valid (5m default), no warning.
+	body := []byte(`{"tools":[{"cache_control":{"type":"ephemeral"}}]}`)
+	warnings := validateCacheControlTTL(body)
+	if len(warnings) != 0 {
+		t.Fatalf("expected no warning for absent ttl, got %v", warnings)
+	}
+}
+
+func TestValidateCacheControlTTL_DoesNotMutateBody(t *testing.T) {
+	original := []byte(`{"tools":[{"cache_control":{"type":"ephemeral","ttl":"2h"}}]}`)
+	body := make([]byte, len(original))
+	copy(body, original)
+	_ = validateCacheControlTTL(body)
+	if string(body) != string(original) {
+		t.Fatalf("validate must not mutate body; before=%s after=%s", original, body)
+	}
+	_ = sjson.SetBytes // keep import used even if helpers change
+}
+
+func TestValidateCacheControlTTL_WarnsOnNonStringTTL(t *testing.T) {
+	// ttl as a number → non-string → exactly one warning, no double report.
+	body := []byte(`{"tools":[{"cache_control":{"type":"ephemeral","ttl":123}}]}`)
+	warnings := validateCacheControlTTL(body)
+	if len(warnings) != 1 {
+		t.Fatalf("expected exactly one warning for non-string ttl, got %d: %v", len(warnings), warnings)
+	}
+}
+
+func TestValidateCacheControlTTL_ScansMessagesArrayForm(t *testing.T) {
+	// cache_control.ttl on a message content block (array form) must be scanned.
+	body := []byte(`{"messages":[{"role":"user","content":[{"type":"text","text":"hi","cache_control":{"type":"ephemeral","ttl":"3h"}}]}]}`)
+	warnings := validateCacheControlTTL(body)
+	if len(warnings) == 0 {
+		t.Fatalf("expected warning for ttl 3h in messages, got none")
+	}
+}

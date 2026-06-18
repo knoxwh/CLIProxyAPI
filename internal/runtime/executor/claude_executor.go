@@ -237,19 +237,25 @@ func (e *ClaudeExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 	body = disableThinkingIfToolChoiceForced(body)
 	body = normalizeClaudeTemperatureForThinking(body)
 
-	// Auto-inject cache_control if missing (optimization for ClawdBot/clients without caching support)
-	if countCacheControls(body) == 0 {
-		body = ensureCacheControl(body)
-	}
+	// cache_control injection moved to tklite (design §4.1): CPA must NOT
+	// pre-inject markers before tklite normalizes the body, otherwise the
+	// marker follows its original block and points at a stale boundary
+	// after normalization reorders/strips content. tklite's
+	// auto_place_anthropic_cache_control owns marker placement with a
+	// customer-placement-wins gate.
 
 	// Enforce Anthropic's cache_control block limit (max 4 breakpoints per request).
-	// Cloaking and ensureCacheControl may push the total over 4 when the client
-	// already sends multiple cache_control blocks.
+	// Cloaking may push the total over 4 when the client already sends multiple
+	// cache_control blocks (CPA no longer injects markers; design §4.1).
 	body = enforceCacheControlLimit(body, 4)
 
-	// Normalize TTL values to prevent ordering violations under prompt-caching-scope-2026-01-05.
-	// A 1h-TTL block must not appear after a 5m-TTL block in evaluation order (tools→system→messages).
-	body = normalizeCacheControlTTL(body)
+	// TTL normalization removed (design §4.2): TTL is user/upstream cost policy;
+	// CPA must not silently rewrite cost semantics. Validation-only path added in Task 7.
+	// TTL validation (design §4.4): read-only warning surface for unsupported
+	// ttl values. Does not mutate body. Local-self-use passes through.
+	for _, warning := range validateCacheControlTTL(body) {
+		log.Warn(warning)
+	}
 
 	// tklite cache optimization (after existing cache_control logic; tklite detects existing markers and skips placement)
 	body = tklite.Optimize(ctx, e.cfg, "/v1/messages", body, CacheOptTKLiteHeaders(auth, req, opts.Headers))
@@ -428,16 +434,23 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 	body = disableThinkingIfToolChoiceForced(body)
 	body = normalizeClaudeTemperatureForThinking(body)
 
-	// Auto-inject cache_control if missing (optimization for ClawdBot/clients without caching support)
-	if countCacheControls(body) == 0 {
-		body = ensureCacheControl(body)
-	}
+	// cache_control injection moved to tklite (design §4.1): CPA must NOT
+	// pre-inject markers before tklite normalizes the body, otherwise the
+	// marker follows its original block and points at a stale boundary
+	// after normalization reorders/strips content. tklite's
+	// auto_place_anthropic_cache_control owns marker placement with a
+	// customer-placement-wins gate.
 
 	// Enforce Anthropic's cache_control block limit (max 4 breakpoints per request).
 	body = enforceCacheControlLimit(body, 4)
 
-	// Normalize TTL values to prevent ordering violations under prompt-caching-scope-2026-01-05.
-	body = normalizeCacheControlTTL(body)
+	// TTL normalization removed (design §4.2): TTL is user/upstream cost policy;
+	// CPA must not silently rewrite cost semantics. Validation-only path added in Task 7.
+	// TTL validation (design §4.4): read-only warning surface for unsupported
+	// ttl values. Does not mutate body. Local-self-use passes through.
+	for _, warning := range validateCacheControlTTL(body) {
+		log.Warn(warning)
+	}
 
 	// tklite cache optimization (after existing cache_control logic; tklite detects existing markers and skips placement)
 	body = tklite.Optimize(ctx, e.cfg, "/v1/messages", body, CacheOptTKLiteHeaders(auth, req, opts.Headers))
@@ -689,7 +702,20 @@ func (e *ClaudeExecutor) CountTokens(ctx context.Context, auth *cliproxyauth.Aut
 	}
 
 	// Keep count_tokens requests compatible with Anthropic cache-control constraints too.
+	// count_tokens does NOT go through tklite (no cache_control injection there), and
+	// has no cache behavior of its own — so TTL normalization here is purely to avoid
+	// Anthropic 4xx on ordering violations. The messages path delegates marker
+	// placement to tklite (design §4.1/§4.2); count_tokens keeps the legacy guard.
 	body = enforceCacheControlLimit(body, 4)
+
+	// TTL validation (design §4.4): read-only warning surface. MUST run BEFORE
+	// normalizeCacheControlTTL below — normalization downgrades 1h→5m, so running
+	// validate after it would hide the user's original (possibly invalid) intent.
+	// Mirrors the messages-path ordering: validate pre-normalization, then mutate.
+	for _, warning := range validateCacheControlTTL(body) {
+		log.Warn(warning)
+	}
+
 	body = normalizeCacheControlTTL(body)
 
 	// Extract betas from body and convert to header (for count_tokens too)
@@ -2139,6 +2165,68 @@ func normalizeCacheControlTTL(payload []byte) []byte {
 		return original
 	}
 	return payload
+}
+
+// validateCacheControlTTL inspects every cache_control block's ttl field
+// and returns a warning string for each ttl value that is not one of the
+// Anthropic-supported values (currently "5m" / "1h") or absent (absent =
+// API default 5m, which is valid).
+//
+// READ-ONLY: never mutates payload (design §4.4). CPA must not silently
+// rewrite user cost semantics; it only surfaces risky values via warnings.
+// Local-self-use default is to pass through, not reject.
+func validateCacheControlTTL(payload []byte) []string {
+	if len(payload) == 0 || !gjson.ValidBytes(payload) {
+		return nil
+	}
+	var warnings []string
+	check := func(path string, obj gjson.Result) {
+		cc := obj.Get("cache_control")
+		if !cc.Exists() || !cc.IsObject() {
+			return
+		}
+		ttl := cc.Get("ttl")
+		if !ttl.Exists() {
+			return // absent = default 5m, valid
+		}
+		if ttl.Type != gjson.String {
+			warnings = append(warnings, fmt.Sprintf("%s.cache_control.ttl is non-string: %v", path, ttl.Raw))
+			return
+		}
+		v := ttl.String()
+		if v != "5m" && v != "1h" {
+			warnings = append(warnings, fmt.Sprintf("%s.cache_control.ttl has unsupported value %q (want 5m or 1h)", path, v))
+		}
+	}
+	tools := gjson.GetBytes(payload, "tools")
+	if tools.IsArray() {
+		tools.ForEach(func(idx, item gjson.Result) bool {
+			check(fmt.Sprintf("tools.%d", int(idx.Int())), item)
+			return true
+		})
+	}
+	system := gjson.GetBytes(payload, "system")
+	if system.IsArray() {
+		system.ForEach(func(idx, item gjson.Result) bool {
+			check(fmt.Sprintf("system.%d", int(idx.Int())), item)
+			return true
+		})
+	}
+	messages := gjson.GetBytes(payload, "messages")
+	if messages.IsArray() {
+		messages.ForEach(func(msgIdx, msg gjson.Result) bool {
+			content := msg.Get("content")
+			if !content.IsArray() {
+				return true
+			}
+			content.ForEach(func(itemIdx, item gjson.Result) bool {
+				check(fmt.Sprintf("messages.%d.content.%d", int(msgIdx.Int()), int(itemIdx.Int())), item)
+				return true
+			})
+			return true
+		})
+	}
+	return warnings
 }
 
 // enforceCacheControlLimit removes excess cache_control blocks from a payload
