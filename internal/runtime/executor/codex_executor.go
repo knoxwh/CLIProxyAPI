@@ -816,6 +816,9 @@ func (e *CodexExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, re
 		originalPayloadSource = opts.OriginalRequest
 	}
 	originalPayload := originalPayloadSource
+	// PR-F0: strip historical <system-reminder> blocks from Claude-native
+	// body BEFORE protocol translation (gate from==claude).
+	ApplyReminderStripIfClaude(ctx, e.cfg, from, &req, auth, opts.Headers)
 	originalTranslated, body := translateCodexRequestPair(from, to, baseModel, originalPayload, req.Payload, false)
 
 	body, err = thinking.ApplyThinking(body, req.Model, from.String(), to.String(), e.Identifier())
@@ -1008,6 +1011,9 @@ func (e *CodexExecutor) executeCompact(ctx context.Context, auth *cliproxyauth.A
 		originalPayloadSource = opts.OriginalRequest
 	}
 	originalPayload := originalPayloadSource
+	// PR-F0: strip historical <system-reminder> blocks from Claude-native
+	// body BEFORE protocol translation (gate from==claude).
+	ApplyReminderStripIfClaude(ctx, e.cfg, from, &req, auth, opts.Headers)
 	originalTranslated, body := translateCodexRequestPair(from, to, baseModel, originalPayload, req.Payload, false)
 
 	body, err = thinking.ApplyThinking(body, req.Model, from.String(), to.String(), e.Identifier())
@@ -1126,6 +1132,9 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 		originalPayloadSource = opts.OriginalRequest
 	}
 	originalPayload := originalPayloadSource
+	// PR-F0: strip historical <system-reminder> blocks from Claude-native
+	// body BEFORE protocol translation (gate from==claude).
+	ApplyReminderStripIfClaude(ctx, e.cfg, from, &req, auth, opts.Headers)
 	originalTranslated, body := translateCodexRequestPair(from, to, baseModel, originalPayload, req.Payload, true)
 
 	body, err = thinking.ApplyThinking(body, req.Model, from.String(), to.String(), e.Identifier())
