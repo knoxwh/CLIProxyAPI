@@ -523,6 +523,12 @@ type CodexKey struct {
 
 	// DisableCooling disables auth/model cooldown scheduling for this credential when true.
 	DisableCooling bool `yaml:"disable-cooling,omitempty" json:"disable-cooling,omitempty"`
+
+	// DisableResponseChaining disables previous_response_id injection for
+	// upstreams that reject it (e.g. local proxies without response storage).
+	// When true, store is forced to false and no previous_response_id is
+	// injected by CacheOptPostTKLite. prompt_cache_key still applies.
+	DisableResponseChaining bool `yaml:"disable-response-chaining,omitempty" json:"disable-response-chaining,omitempty"`
 }
 
 func (k CodexKey) GetAPIKey() string  { return k.APIKey }

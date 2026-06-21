@@ -41,9 +41,14 @@ func isAPIKeyAuth(auth *cliproxyauth.Auth) bool {
 //   - Delete prompt_cache_retention (tklite may re-inject it after trunk
 //     deleted it; upstream APIs reject this field)
 //
-// API key path (isAPIKey=true, muskapi upstream):
+// API key path, chaining enabled (default, muskapi upstream):
 //   - Set store=true (enables response storage → previous_response_id)
 //   - Inject previous_response_id from session map (conversation chaining)
+//
+// API key path, chaining disabled (disable-response-chaining: true):
+//   - Force store=false (upstream has no response storage)
+//   - Delete previous_response_id (upstream rejects it)
+//   - prompt_cache_key still provides stateless prefix caching
 //
 // OAuth path (isAPIKey=false, chatgpt.com upstream):
 //   - Override store=false (chatgpt.com requires this)
@@ -51,6 +56,17 @@ func CacheOptPostTKLite(auth *cliproxyauth.Auth, body []byte, req cliproxyexecut
 	body, _ = sjson.DeleteBytes(body, "prompt_cache_retention")
 
 	if isAPIKeyAuth(auth) {
+		if helps.CodexResponseChainingDisabled(auth) {
+			// ── API key path, chaining disabled: no previous_response_id,
+			// but keep store=true so the upstream still caches the prompt
+			// prefix (prompt_cache_key) for stateless hit across turns. ──
+			body, _ = sjson.SetBytes(body, "store", true)
+			body, _ = sjson.DeleteBytes(body, "previous_response_id")
+			if sessionKey := cacheOptSessionResponseKey(auth, req); sessionKey != "" {
+				helps.DeleteSessionResponseID(sessionKey)
+			}
+			return body
+		}
 		// ── API key path: enable conversation chaining ──
 		body, _ = sjson.SetBytes(body, "store", true)
 
@@ -92,6 +108,12 @@ func CacheOptPostTKLite(auth *cliproxyauth.Auth, body []byte, req cliproxyexecut
 // the next request in the same session can set previous_response_id.
 func CacheOptStoreResponseID(auth *cliproxyauth.Auth, req cliproxyexecutor.Request, completedData []byte) {
 	if !isAPIKeyAuth(auth) {
+		return
+	}
+	if helps.CodexResponseChainingDisabled(auth) {
+		if sessionKey := cacheOptSessionResponseKey(auth, req); sessionKey != "" {
+			helps.DeleteSessionResponseID(sessionKey)
+		}
 		return
 	}
 	respID := gjson.GetBytes(completedData, "response.id").String()
