@@ -163,10 +163,7 @@ func CacheOptResolveCacheKey(auth *cliproxyauth.Auth, rawJSON []byte, proposedID
 // base URLs must not share a previous_response_id.
 
 func cacheOptSessionResponseKey(auth *cliproxyauth.Auth, req cliproxyexecutor.Request) string {
-	sessionKey := codexClaudeCodePromptCacheStorageKey(req)
-	if sessionKey == "" {
-		sessionKey = extractClaudeCodeSessionIDForCodexReplay(req.Payload)
-	}
+	sessionKey := helps.ExtractClaudeCodeSessionID(nil, req.Payload, nil)
 	if sessionKey == "" {
 		return ""
 	}
