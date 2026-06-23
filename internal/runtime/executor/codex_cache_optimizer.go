@@ -2,7 +2,7 @@
 //
 // This file is self-contained and manages ALL custom logic for
 // improving prompt cache hit rates on the codex-api-key path
-// (standard OpenAI API / muskapi upstream). The OAuth/subscription
+// (standard OpenAI Responses API upstream). The OAuth/subscription
 // path (chatgpt.com backend) keeps its original behavior.
 //
 // When the upstream CLIProxyAPI repo updates, you only need to
@@ -41,13 +41,14 @@ func isAPIKeyAuth(auth *cliproxyauth.Auth) bool {
 //   - Delete prompt_cache_retention (tklite may re-inject it after trunk
 //     deleted it; upstream APIs reject this field)
 //
-// API key path, chaining enabled (default, muskapi upstream):
+// API key path, chaining enabled (default):
 //   - Set store=true (enables response storage → previous_response_id)
 //   - Inject previous_response_id from session map (conversation chaining)
 //
 // API key path, chaining disabled (disable-response-chaining: true):
-//   - Force store=false (upstream has no response storage)
-//   - Delete previous_response_id (upstream rejects it)
+//   - Set store=false (aligns with codex non-WS HTTP: store = is_azure_responses_endpoint(),
+//     false for non-Azure upstreams; prompt caching is automatic and store-independent)
+//   - Delete previous_response_id (no stored baseline to reference)
 //   - prompt_cache_key still provides stateless prefix caching
 //
 // OAuth path (isAPIKey=false, chatgpt.com upstream):
@@ -57,10 +58,18 @@ func CacheOptPostTKLite(auth *cliproxyauth.Auth, body []byte, req cliproxyexecut
 
 	if isAPIKeyAuth(auth) {
 		if helps.CodexResponseChainingDisabled(auth) {
-			// ── API key path, chaining disabled: no previous_response_id,
-			// but keep store=true so the upstream still caches the prompt
-			// prefix (prompt_cache_key) for stateless hit across turns. ──
-			body, _ = sjson.SetBytes(body, "store", true)
+			// ── API key path, chaining disabled: align with codex non-WS HTTP
+			// behavior. codex sets store = is_azure_responses_endpoint(), which
+			// is false for non-Azure upstreams (the standard OpenAI Responses
+			// API case). Prompt caching is automatic and independent of `store`
+			// (per OpenAI docs), so store=false does not hurt prefix cache hit
+			// rates — prompt_cache_key still routes to the stable cache bucket.
+			// store=false also avoids 30-day server-side response retention
+			// when no chaining is intended.
+			//
+			// previous_response_id is deleted: with chaining disabled there is
+			// no stored baseline to reference. ──
+			body, _ = sjson.SetBytes(body, "store", false)
 			body, _ = sjson.DeleteBytes(body, "previous_response_id")
 			if sessionKey := cacheOptSessionResponseKey(auth, req); sessionKey != "" {
 				helps.DeleteSessionResponseID(sessionKey)

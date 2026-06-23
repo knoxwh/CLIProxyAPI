@@ -228,13 +228,7 @@ func (e *CodexWebsocketsExecutor) Execute(ctx context.Context, auth *cliproxyaut
 	clientBody := body
 	var identityState codexIdentityConfuseState
 	upstreamBody, identityState := applyCodexIdentityConfuseBody(e.cfg, auth, originalPayloadSource, body)
-	if helps.CodexResponseChainingDisabled(auth) {
-		// Keep store=true so the upstream caches the prompt prefix
-		// (prompt_cache_key) for stateless hit across turns; only the
-		// previous_response_id chain is disabled.
-		upstreamBody, _ = sjson.SetBytes(upstreamBody, "store", true)
-		upstreamBody, _ = sjson.DeleteBytes(upstreamBody, "previous_response_id")
-	}
+	// WS chaining is client-native; do not strip previous_response_id here.
 	reporter.SetTranslatedReasoningEffort(clientBody, to.String())
 	wsHeaders = applyCodexWebsocketHeaders(ctx, wsHeaders, auth, apiKey, e.cfg)
 	applyCodexIdentityConfuseHeaders(wsHeaders, &identityState)
@@ -455,13 +449,7 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 	clientBody := body
 	var identityState codexIdentityConfuseState
 	upstreamBody, identityState := applyCodexIdentityConfuseBody(e.cfg, auth, userPayload, body)
-	if helps.CodexResponseChainingDisabled(auth) {
-		// Keep store=true so the upstream caches the prompt prefix
-		// (prompt_cache_key) for stateless hit across turns; only the
-		// previous_response_id chain is disabled.
-		upstreamBody, _ = sjson.SetBytes(upstreamBody, "store", true)
-		upstreamBody, _ = sjson.DeleteBytes(upstreamBody, "previous_response_id")
-	}
+	// WS chaining is client-native; do not strip previous_response_id here.
 	reporter.SetTranslatedReasoningEffort(clientBody, to.String())
 	wsHeaders = applyCodexWebsocketHeaders(ctx, wsHeaders, auth, apiKey, e.cfg)
 	applyCodexIdentityConfuseHeaders(wsHeaders, &identityState)

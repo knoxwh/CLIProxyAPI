@@ -297,11 +297,13 @@ func TestApplyCodexWebsocketHeadersDefaultsToCurrentResponsesBeta(t *testing.T) 
 	if !strings.HasPrefix(codexUserAgent, codexOriginator+"/") {
 		t.Fatalf("default Codex User-Agent = %s, want prefix %s/", codexUserAgent, codexOriginator)
 	}
-	if !strings.HasPrefix(codexUserAgent, "codex-tui/") {
-		t.Fatalf("default Codex User-Agent = %s, want codex-tui prefix", codexUserAgent)
+	// UA must not carry the legacy codex-tui marker or the synthetic
+	// "(codex-tui; <ver>)" suffix that real codex-tui never emits.
+	if strings.HasPrefix(codexUserAgent, "codex-tui/") {
+		t.Fatalf("default Codex User-Agent = %s, must not use codex-tui prefix", codexUserAgent)
 	}
-	if !strings.Contains(codexUserAgent, "(codex-tui;") {
-		t.Fatalf("default Codex User-Agent = %s, want codex-tui suffix", codexUserAgent)
+	if strings.Contains(codexUserAgent, "(codex-tui;") {
+		t.Fatalf("default Codex User-Agent = %s, must not carry codex-tui suffix", codexUserAgent)
 	}
 	if got := headers.Get("Originator"); got != codexOriginator {
 		t.Fatalf("Originator = %s, want %s", got, codexOriginator)
