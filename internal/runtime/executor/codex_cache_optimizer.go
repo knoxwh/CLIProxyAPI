@@ -1,13 +1,9 @@
-// ─── Cache Optimization for API Key Auth ─────────────────────
+// ─── Cache Optimization and TKLite Helpers ───────────────────
 //
-// This file is self-contained and manages ALL custom logic for
-// improving prompt cache hit rates on the codex-api-key path
-// (standard OpenAI Responses API upstream). The OAuth/subscription
-// path (chatgpt.com backend) keeps its original behavior.
-//
-// When the upstream CLIProxyAPI repo updates, you only need to
-// re-add the hook calls in codex_executor.go (3-5 lines total).
-// This file itself requires no changes.
+// This file is self-contained and manages custom prompt-cache logic for
+// Codex requests. API-key response chaining is opt-in: credentials must set
+// enable-response-chaining: true before previous_response_id is sent. All
+// other paths strip response-chaining fields and avoid response storage.
 
 package executor
 
@@ -36,59 +32,20 @@ func isAPIKeyAuth(auth *cliproxyauth.Auth) bool {
 // ─── Hook 1: Post-tklite adjustments ──────────────────────────
 //
 // Called after tklite.Optimize() in Execute and ExecuteStream.
-//
-// All paths:
-//   - Delete prompt_cache_retention (tklite may re-inject it after trunk
-//     deleted it; upstream APIs reject this field)
-//
-// API key path, chaining enabled (default):
-//   - Set store=true (enables response storage → previous_response_id)
-//   - Inject previous_response_id from session map (conversation chaining)
-//
-// API key path, chaining disabled (disable-response-chaining: true):
-//   - Set store=false (aligns with codex non-WS HTTP: store = is_azure_responses_endpoint(),
-//     false for non-Azure upstreams; prompt caching is automatic and store-independent)
-//   - Delete previous_response_id (no stored baseline to reference)
-//   - prompt_cache_key still provides stateless prefix caching
-//
-// OAuth path (isAPIKey=false, chatgpt.com upstream):
-//   - Override store=false (chatgpt.com requires this)
+// Deletes prompt_cache_retention on every path. Opt-in API-key credentials may
+// send previous_response_id and store responses; all other paths force
+// store=false, drop previous_response_id, and clear stale cached response IDs.
 func CacheOptPostTKLite(auth *cliproxyauth.Auth, body []byte, req cliproxyexecutor.Request, originalPayloadSource []byte) []byte {
 	body, _ = sjson.DeleteBytes(body, "prompt_cache_retention")
 
-	if isAPIKeyAuth(auth) {
-		if helps.CodexResponseChainingDisabled(auth) {
-			// ── API key path, chaining disabled: align with codex non-WS HTTP
-			// behavior. codex sets store = is_azure_responses_endpoint(), which
-			// is false for non-Azure upstreams (the standard OpenAI Responses
-			// API case). Prompt caching is automatic and independent of `store`
-			// (per OpenAI docs), so store=false does not hurt prefix cache hit
-			// rates — prompt_cache_key still routes to the stable cache bucket.
-			// store=false also avoids 30-day server-side response retention
-			// when no chaining is intended.
-			//
-			// previous_response_id is deleted: with chaining disabled there is
-			// no stored baseline to reference. ──
-			body, _ = sjson.SetBytes(body, "store", false)
-			body, _ = sjson.DeleteBytes(body, "previous_response_id")
-			if sessionKey := cacheOptSessionResponseKey(auth, req); sessionKey != "" {
-				helps.DeleteSessionResponseID(sessionKey)
-			}
-			return body
-		}
-		// ── API key path: enable conversation chaining ──
+	if isAPIKeyAuth(auth) && helps.CodexResponseChainingEnabled(auth) {
 		body, _ = sjson.SetBytes(body, "store", true)
 
-		// Inject previous_response_id only when the client did not
-		// explicitly provide a non-empty one. originalPayloadSource is the raw
-		// client payload before trunk deletes the field for OAuth safety.
 		pr := gjson.GetBytes(originalPayloadSource, "previous_response_id")
 		if pr.Exists() {
 			if clientValue := strings.TrimSpace(pr.String()); clientValue != "" {
 				body, _ = sjson.SetBytes(body, "previous_response_id", clientValue)
 			}
-			// Empty client value is treated as "no explicit intent" and falls
-			// through to the session-cache fallback below.
 		}
 		if gjson.GetBytes(body, "previous_response_id").String() == "" {
 			sessionKey := cacheOptSessionResponseKey(auth, req)
@@ -98,14 +55,13 @@ func CacheOptPostTKLite(auth *cliproxyauth.Auth, body []byte, req cliproxyexecut
 				}
 			}
 		}
-	} else {
-		// ── OAuth/subscription path: chatgpt.com backend ──
-		// tklite injects store=true for Responses API shape,
-		// but chatgpt.com requires store=false.
-		body, _ = sjson.SetBytes(body, "store", false)
-		// Defensive delete: keep chatgpt.com compatible even if future
-		// upstream changes leave this field in the body.
-		body, _ = sjson.DeleteBytes(body, "previous_response_id")
+		return body
+	}
+
+	body, _ = sjson.SetBytes(body, "store", false)
+	body, _ = sjson.DeleteBytes(body, "previous_response_id")
+	if sessionKey := cacheOptSessionResponseKey(auth, req); sessionKey != "" {
+		helps.DeleteSessionResponseID(sessionKey)
 	}
 	return body
 }
@@ -113,13 +69,11 @@ func CacheOptPostTKLite(auth *cliproxyauth.Auth, body []byte, req cliproxyexecut
 // ─── Hook 2: Store response.id for chaining ───────────────────
 //
 // Called after response.completed in Execute and ExecuteStream.
-// Only active for API key auth — stores the last response.id so
+// Only active for opt-in API key auth — stores the last response.id so
 // the next request in the same session can set previous_response_id.
 func CacheOptStoreResponseID(auth *cliproxyauth.Auth, req cliproxyexecutor.Request, completedData []byte) {
-	if !isAPIKeyAuth(auth) {
-		return
-	}
-	if helps.CodexResponseChainingDisabled(auth) {
+	if !isAPIKeyAuth(auth) || !helps.CodexResponseChainingEnabled(auth) {
+		// Clear here too in case this hook runs after config flips or without CacheOptPostTKLite.
 		if sessionKey := cacheOptSessionResponseKey(auth, req); sessionKey != "" {
 			helps.DeleteSessionResponseID(sessionKey)
 		}

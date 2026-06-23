@@ -84,7 +84,7 @@ func TestClientPreviousResponseIDRespected(t *testing.T) {
 	originalPayload := []byte(`{"previous_response_id":"client-chosen-id","input":[{"role":"user","content":"hi"}]}`)
 	body := []byte(`{"input":[{"role":"user","content":"hi"}]}`)
 
-	auth := &cliproxyauth.Auth{Attributes: map[string]string{"api_key": "sk-test"}}
+	auth := &cliproxyauth.Auth{Attributes: map[string]string{"api_key": "sk-test", cliproxyauth.AttributeEnableResponseChaining: "true"}}
 	req := cliproxyexecutor.Request{Payload: originalPayload}
 	result := CacheOptPostTKLite(auth, body, req, originalPayload)
 
@@ -100,7 +100,7 @@ func TestClientEmptyResponseIDFallsBackToSessionCache(t *testing.T) {
 	body := []byte(`{"input":[{"role":"user","content":"hi"}]}`)
 	auth := &cliproxyauth.Auth{
 		ID:         "auth-empty",
-		Attributes: map[string]string{"api_key": "sk-test"},
+		Attributes: map[string]string{"api_key": "sk-test", cliproxyauth.AttributeEnableResponseChaining: "true"},
 	}
 	req := cliproxyexecutor.Request{
 		Model:   "gpt-5-codex",
@@ -168,8 +168,8 @@ func TestOAuthPathDeletesPreviousResponseID(t *testing.T) {
 	}
 }
 
-func TestCacheOptPostTKLiteDeletesPromptCacheRetentionForAPIKey(t *testing.T) {
-	body := []byte(`{"prompt_cache_retention":"24h","input":[{"role":"user","content":"hi"}]}`)
+func TestAPIKeyPathDefaultsToNoResponseChaining(t *testing.T) {
+	body := []byte(`{"prompt_cache_retention":"24h","previous_response_id":"must-drop","input":[{"role":"user","content":"hi"}]}`)
 	auth := &cliproxyauth.Auth{Attributes: map[string]string{"api_key": "sk-test"}}
 	req := cliproxyexecutor.Request{}
 
@@ -178,8 +178,30 @@ func TestCacheOptPostTKLiteDeletesPromptCacheRetentionForAPIKey(t *testing.T) {
 	if gjson.GetBytes(result, "prompt_cache_retention").Exists() {
 		t.Fatal("API key path should delete prompt_cache_retention")
 	}
-	if gjson.GetBytes(result, "store").Bool() != true {
-		t.Fatal("API key path should still set store=true")
+	if gjson.GetBytes(result, "previous_response_id").Exists() {
+		t.Fatalf("API key path should drop previous_response_id by default: %s", result)
+	}
+	if gjson.GetBytes(result, "store").Bool() != false {
+		t.Fatal("API key path should set store=false by default")
+	}
+}
+
+func TestCacheOptStoreResponseIDNoopsUnlessChainingEnabled(t *testing.T) {
+	auth := &cliproxyauth.Auth{
+		ID:         "auth-default-off",
+		Attributes: map[string]string{"api_key": "sk-test"},
+	}
+	req := cliproxyexecutor.Request{
+		Model:   "gpt-5-codex",
+		Payload: []byte(`{"metadata":{"user_id":"_session_99999999-8888-7777-6666-555555555555"}}`),
+	}
+	sessionKey := cacheOptSessionResponseKey(auth, req)
+	helps.DeleteSessionResponseID(sessionKey)
+
+	CacheOptStoreResponseID(auth, req, []byte(`{"response":{"id":"resp-default-off"}}`))
+
+	if got, ok := helps.GetSessionResponseID(sessionKey); ok {
+		t.Fatalf("default API key path should not store response_id, got %q", got)
 	}
 }
 
@@ -187,7 +209,7 @@ func TestCacheOptFallsBackToSessionCache(t *testing.T) {
 	body := []byte(`{"input":[{"role":"user","content":"hi"}]}`)
 	auth := &cliproxyauth.Auth{
 		ID:         "auth-789",
-		Attributes: map[string]string{"api_key": "sk-test"},
+		Attributes: map[string]string{"api_key": "sk-test", cliproxyauth.AttributeEnableResponseChaining: "true"},
 	}
 	req := cliproxyexecutor.Request{
 		Model:   "gpt-5-codex",

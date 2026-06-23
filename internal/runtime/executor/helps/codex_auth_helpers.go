@@ -6,11 +6,11 @@ import (
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 )
 
-// CodexResponseChainingDisabled returns true when the upstream rejects
-// previous_response_id and response storage for this Codex credential.
-func CodexResponseChainingDisabled(auth *cliproxyauth.Auth) bool {
+// CodexResponseChainingEnabled returns true when this Codex credential may
+// send previous_response_id and store response IDs for follow-up requests.
+func CodexResponseChainingEnabled(auth *cliproxyauth.Auth) bool {
 	if auth == nil || auth.Attributes == nil {
 		return false
 	}
-	return strings.TrimSpace(auth.Attributes[cliproxyauth.AttributeDisableResponseChaining]) == "true"
+	return strings.TrimSpace(auth.Attributes[cliproxyauth.AttributeEnableResponseChaining]) == "true"
 }
