@@ -1,9 +1,10 @@
 // ─── Cache Optimization and TKLite Helpers ───────────────────
 //
 // This file is self-contained and manages custom prompt-cache logic for
-// Codex requests. API-key response chaining is opt-in: credentials must set
-// enable-response-chaining: true before previous_response_id is sent. All
-// other paths strip response-chaining fields and avoid response storage.
+// Codex requests. Non-WebSocket Codex paths force store=false and delete
+// previous_response_id; response.id storage and previous_response_id
+// injection are intentionally not supported outside the WebSocket path,
+// where chaining is client-native.
 
 package executor
 
@@ -33,68 +34,18 @@ func isAPIKeyAuth(auth *cliproxyauth.Auth) bool {
 // ─── Hook 1: Post-tklite adjustments ──────────────────────────
 //
 // Called after tklite.Optimize() in Execute and ExecuteStream.
-// Deletes prompt_cache_retention on every path. Opt-in API-key credentials may
-// send previous_response_id and store responses; all other paths force
-// store=false, drop previous_response_id, and clear stale cached response IDs.
-func CacheOptPostTKLite(auth *cliproxyauth.Auth, body []byte, req cliproxyexecutor.Request, originalPayloadSource []byte, headers ...http.Header) []byte {
+// Non-WebSocket Codex paths force store=false and delete
+// previous_response_id. prompt_cache_retention is also stripped because
+// tklite may re-inject it and the upstream Responses API rejects that
+// field with HTTP 400 ("Unsupported parameter: prompt_cache_retention").
+func CacheOptPostTKLite(body []byte) []byte {
 	body, _ = sjson.DeleteBytes(body, "prompt_cache_retention")
-
-	if isAPIKeyAuth(auth) && helps.CodexResponseChainingEnabled(auth) {
-		body, _ = sjson.SetBytes(body, "store", true)
-
-		pr := gjson.GetBytes(originalPayloadSource, "previous_response_id")
-		if pr.Exists() {
-			if clientValue := strings.TrimSpace(pr.String()); clientValue != "" {
-				body, _ = sjson.SetBytes(body, "previous_response_id", clientValue)
-			}
-		}
-		if gjson.GetBytes(body, "previous_response_id").String() == "" {
-			sessionKey := cacheOptSessionResponseKey(auth, req, headers...)
-			if sessionKey != "" {
-				if lastRespID, ok := helps.GetSessionResponseID(sessionKey); ok && lastRespID != "" {
-					body, _ = sjson.SetBytes(body, "previous_response_id", lastRespID)
-				}
-			}
-		}
-		return body
-	}
-
-	body, _ = sjson.SetBytes(body, "store", false)
 	body, _ = sjson.DeleteBytes(body, "previous_response_id")
-	if sessionKey := cacheOptSessionResponseKey(auth, req, headers...); sessionKey != "" {
-		helps.DeleteSessionResponseID(sessionKey)
-	}
+	body, _ = sjson.SetBytes(body, "store", false)
 	return body
 }
 
-// ─── Hook 2: Store response.id for chaining ───────────────────
-//
-// Called after response.completed in Execute and ExecuteStream.
-// Only active for opt-in API key auth — stores the last response.id so
-// the next request in the same session can set previous_response_id.
-func CacheOptStoreResponseID(auth *cliproxyauth.Auth, req cliproxyexecutor.Request, completedData []byte, headers ...http.Header) {
-	if !isAPIKeyAuth(auth) || !helps.CodexResponseChainingEnabled(auth) {
-		// Clear here too in case this hook runs after config flips or without CacheOptPostTKLite.
-		if sessionKey := cacheOptSessionResponseKey(auth, req, headers...); sessionKey != "" {
-			helps.DeleteSessionResponseID(sessionKey)
-		}
-		return
-	}
-	respID := gjson.GetBytes(completedData, "response.id").String()
-	if respID == "" {
-		respID = gjson.GetBytes(completedData, "id").String()
-	}
-	if respID == "" {
-		return
-	}
-	sessionKey := cacheOptSessionResponseKey(auth, req, headers...)
-	if sessionKey == "" {
-		return
-	}
-	helps.SetSessionResponseID(sessionKey, respID)
-}
-
-// ─── Hook 3: Resolve prompt_cache_key ─────────────────────────
+// ─── Hook 2: Resolve prompt_cache_key ─────────────────────────
 //
 // Called inside cacheHelper to decide whether to preserve
 // tklite's stable prompt_cache_key or use the generated uuid.
@@ -117,10 +68,10 @@ func CacheOptResolveCacheKey(auth *cliproxyauth.Auth, rawJSON []byte, proposedID
 
 // ─── Auth-scoped session key helpers ───────────────────────────
 //
-// Prevents cross-auth response-id reuse: two different API keys or
-// base URLs must not share a previous_response_id.
+// Prevents cross-auth cache mixing: two different API keys or
+// base URLs must not share a tklite session bucket.
 
-func cacheOptSessionResponseKey(auth *cliproxyauth.Auth, req cliproxyexecutor.Request, headers ...http.Header) string {
+func cacheOptSessionKey(auth *cliproxyauth.Auth, req cliproxyexecutor.Request, headers ...http.Header) string {
 	var hdr http.Header
 	if len(headers) > 0 {
 		hdr = headers[0]
@@ -158,7 +109,7 @@ func cacheOptAuthScope(auth *cliproxyauth.Auth) string {
 // tklite.Optimize() call to prevent opts.Headers mutation.
 
 func CacheOptTKLiteSessionKey(auth *cliproxyauth.Auth, req cliproxyexecutor.Request, headers ...http.Header) string {
-	sessionKey := cacheOptSessionResponseKey(auth, req, headers...)
+	sessionKey := cacheOptSessionKey(auth, req, headers...)
 	if strings.TrimSpace(sessionKey) == "" {
 		return ""
 	}
@@ -176,17 +127,12 @@ func CacheOptTKLiteHeaders(auth *cliproxyauth.Auth, req cliproxyexecutor.Request
 	return cloned
 }
 
-func cacheOptDiagnosticsOptions(auth *cliproxyauth.Auth, req cliproxyexecutor.Request, headers http.Header, responseChainingEnabled bool) helps.CacheDiagnosticsOptions {
+func cacheOptDiagnosticsOptions(auth *cliproxyauth.Auth, req cliproxyexecutor.Request, headers http.Header) helps.CacheDiagnosticsOptions {
 	return helps.CacheDiagnosticsOptions{
 		TKLiteSessionKeyPresent: strings.TrimSpace(CacheOptTKLiteSessionKey(auth, req, headers)) != "",
-		ResponseChainingEnabled: responseChainingEnabled,
 	}
 }
 
-func recordResponsesCacheLossRequestInfo(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, upstreamBody []byte, originalPayload []byte, headers http.Header, responseChainingEnabled bool) {
-	helps.RecordCacheLossRequestInfo(ctx, upstreamBody, originalPayload, headers, cacheOptDiagnosticsOptions(auth, req, headers, responseChainingEnabled))
-}
-
-func recordCodexCacheLossRequestInfo(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, upstreamBody []byte, originalPayload []byte, headers http.Header) {
-	recordResponsesCacheLossRequestInfo(ctx, auth, req, upstreamBody, originalPayload, headers, isAPIKeyAuth(auth) && helps.CodexResponseChainingEnabled(auth))
+func recordCacheLossRequestInfo(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, upstreamBody []byte, originalPayload []byte, headers http.Header) {
+	helps.RecordCacheLossRequestInfo(ctx, upstreamBody, originalPayload, headers, cacheOptDiagnosticsOptions(auth, req, headers))
 }

@@ -31,7 +31,6 @@ const cacheLossRequestInfoContextKey = "CACHE_LOSS_REQUEST_INFO"
 // CacheDiagnosticsOptions carries safe request-path facts for cache-loss diagnostics.
 type CacheDiagnosticsOptions struct {
 	TKLiteSessionKeyPresent bool
-	ResponseChainingEnabled bool
 }
 
 type cacheLossRequestInfo struct {
@@ -44,7 +43,6 @@ type cacheLossRequestInfo struct {
 	HasPreviousResponseID     bool
 	StoreValue                string
 	TKLiteSessionKeyPresent   bool
-	ResponseChainingEnabled   bool
 	InstructionsHashPrefix    string
 	MetadataUserIDSessionSeen bool
 }
@@ -78,7 +76,6 @@ type cacheLossDiagnosticEvent struct {
 	HasPreviousResponseID   bool
 	StoreValue              string
 	TKLiteSessionKeyPresent bool
-	ResponseChainingEnabled bool
 	InstructionsHashPrefix  string
 	MetadataSessionPresent  bool
 }
@@ -143,7 +140,6 @@ func buildCacheLossRequestInfo(ctx context.Context, upstreamBody []byte, origina
 		HasPreviousResponseID:   strings.TrimSpace(gjson.GetBytes(body, "previous_response_id").String()) != "",
 		StoreValue:              cacheLossStoreValue(body),
 		TKLiteSessionKeyPresent: options.TKLiteSessionKeyPresent || strings.TrimSpace(headers.Get("x-tklite-session-key")) != "",
-		ResponseChainingEnabled: options.ResponseChainingEnabled,
 		InstructionsHashPrefix:  hashJSONPrefix([]byte(gjson.GetBytes(body, "instructions").Raw)),
 	}
 	if info.SessionID == "" {
@@ -275,7 +271,6 @@ func logCacheLossDiagnostic(ctx context.Context, record usage.Record) {
 		"has_previous_response_id":   event.HasPreviousResponseID,
 		"store":                      event.StoreValue,
 		"tklite_session_key_present": event.TKLiteSessionKeyPresent,
-		"response_chaining_enabled":  event.ResponseChainingEnabled,
 		"instructions_hash_prefix":   event.InstructionsHashPrefix,
 		"metadata_session_present":   event.MetadataSessionPresent,
 	}).Warn("cache loss diagnostic triggered")
@@ -311,7 +306,6 @@ func buildCacheLossDiagnosticEvent(trigger string, record usage.Record, info cac
 		HasPreviousResponseID:   info.HasPreviousResponseID,
 		StoreValue:              info.StoreValue,
 		TKLiteSessionKeyPresent: info.TKLiteSessionKeyPresent,
-		ResponseChainingEnabled: info.ResponseChainingEnabled,
 		InstructionsHashPrefix:  info.InstructionsHashPrefix,
 		MetadataSessionPresent:  info.MetadataUserIDSessionSeen,
 	}

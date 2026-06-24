@@ -63,7 +63,6 @@ func TestCacheLossDiagnosticsEmitsWhenCacheReadDropsToZeroAfterHit(t *testing.T)
 		HasPreviousResponseID:     true,
 		StoreValue:                "false",
 		TKLiteSessionKeyPresent:   true,
-		ResponseChainingEnabled:   true,
 		InstructionsHashPrefix:    "instr123",
 		MetadataUserIDSessionSeen: true,
 	}
@@ -211,7 +210,6 @@ func TestBuildCacheLossRequestInfoExtractsSafeBreadcrumbs(t *testing.T) {
 
 	info := buildCacheLossRequestInfo(context.Background(), upstream, upstream, headers, CacheDiagnosticsOptions{
 		TKLiteSessionKeyPresent: true,
-		ResponseChainingEnabled: true,
 	})
 
 	if info.SessionID != "session-from-header" {
@@ -235,7 +233,7 @@ func TestBuildCacheLossRequestInfoExtractsSafeBreadcrumbs(t *testing.T) {
 	if !info.HasPreviousResponseID || info.StoreValue != "false" {
 		t.Fatalf("response chain fields missing: %#v", info)
 	}
-	if !info.TKLiteSessionKeyPresent || !info.ResponseChainingEnabled {
+	if !info.TKLiteSessionKeyPresent {
 		t.Fatalf("expected cache flags: %#v", info)
 	}
 }

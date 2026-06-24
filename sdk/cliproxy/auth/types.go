@@ -101,11 +101,10 @@ type Auth struct {
 }
 
 const (
-	AttributeAuthIndexSeed          = "auth_index_seed"
-	AttributePluginVirtual          = "plugin_virtual"
-	AttributeVirtualSource          = "virtual_source"
-	AttributeEnableResponseChaining = "enable_response_chaining"
-	pluginVirtualAttrEnabled        = "true"
+	AttributeAuthIndexSeed   = "auth_index_seed"
+	AttributePluginVirtual   = "plugin_virtual"
+	AttributeVirtualSource   = "virtual_source"
+	pluginVirtualAttrEnabled = "true"
 )
 
 // MarkPluginVirtualAuth marks an auth that was expanded from a plugin-owned source file.
