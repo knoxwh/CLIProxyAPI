@@ -171,9 +171,6 @@ func (e *OpenAICompatExecutor) Execute(ctx context.Context, auth *cliproxyauth.A
 		authLabel = auth.Label
 		authType, authValue = auth.AccountInfo()
 	}
-	if endpoint == "/responses/compact" {
-		recordCacheLossRequestInfo(ctx, auth, req, translated, originalPayloadSource, opts.Headers)
-	}
 	helps.RecordAPIRequest(ctx, e.cfg, helps.UpstreamRequestLog{
 		URL:       url,
 		Method:    http.MethodPost,

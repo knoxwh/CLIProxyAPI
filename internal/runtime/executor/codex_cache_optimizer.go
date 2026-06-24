@@ -9,7 +9,6 @@
 package executor
 
 import (
-	"context"
 	"net/http"
 	"strings"
 
@@ -101,7 +100,7 @@ func cacheOptAuthScope(auth *cliproxyauth.Auth) string {
 // ─── Opaque tklite session key + header cloning ────────────────
 //
 // CacheOptTKLiteSessionKey derives a stable opaque session bucket
-// for tklite drift detection. Hashes the auth-scoped session key
+// for tklite cache optimization. Hashes the auth-scoped session key
 // so no raw auth ID, API key, base URL, or session ID leaks.
 //
 // CacheOptTKLiteHeaders clones request headers and injects the
@@ -125,14 +124,4 @@ func CacheOptTKLiteHeaders(auth *cliproxyauth.Auth, req cliproxyexecutor.Request
 		cloned.Set("x-tklite-session-key", sessionKey)
 	}
 	return cloned
-}
-
-func cacheOptDiagnosticsOptions(auth *cliproxyauth.Auth, req cliproxyexecutor.Request, headers http.Header) helps.CacheDiagnosticsOptions {
-	return helps.CacheDiagnosticsOptions{
-		TKLiteSessionKeyPresent: strings.TrimSpace(CacheOptTKLiteSessionKey(auth, req, headers)) != "",
-	}
-}
-
-func recordCacheLossRequestInfo(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, upstreamBody []byte, originalPayload []byte, headers http.Header) {
-	helps.RecordCacheLossRequestInfo(ctx, upstreamBody, originalPayload, headers, cacheOptDiagnosticsOptions(auth, req, headers))
 }

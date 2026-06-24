@@ -1,16 +1,11 @@
 package executor
 
 import (
-	"context"
 	"fmt"
 	"net/http"
-	"net/http/httptest"
-	"reflect"
 	"strings"
 	"testing"
 
-	"github.com/gin-gonic/gin"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/runtime/executor/helps"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
 	"github.com/tidwall/gjson"
@@ -41,72 +36,6 @@ func TestCacheOptTKLiteSessionKeyIsOpaque(t *testing.T) {
 	}
 	if !strings.HasPrefix(key, "cpa:") {
 		t.Fatalf("key prefix = %q", key)
-	}
-}
-
-func TestCacheOptDiagnosticsOptionsCaptureTKLiteFlag(t *testing.T) {
-	auth := &cliproxyauth.Auth{ID: "auth-123", Attributes: map[string]string{"api_key": "sk-secret"}}
-	req := cliproxyexecutor.Request{
-		Model:   "gpt-5-codex",
-		Payload: []byte(`{"metadata":{"user_id":"_session_11111111-2222-3333-4444-555555555555"}}`),
-	}
-	headers := http.Header{}
-	headers.Set(helps.ClaudeCodeSessionHeader, "session-from-header")
-
-	options := cacheOptDiagnosticsOptions(auth, req, headers)
-
-	if !options.TKLiteSessionKeyPresent {
-		t.Fatal("expected tklite session key flag")
-	}
-}
-
-func TestRecordCacheLossRequestInfoCapturesTKLiteFlag(t *testing.T) {
-	gin.SetMode(gin.TestMode)
-	ginCtx, _ := gin.CreateTestContext(httptest.NewRecorder())
-	ctx := context.WithValue(context.Background(), "gin", ginCtx)
-	auth := &cliproxyauth.Auth{ID: "auth-123", Attributes: map[string]string{"api_key": "sk-secret"}}
-	req := cliproxyexecutor.Request{Payload: []byte(`{"metadata":{"user_id":"_session_11111111-2222-3333-4444-555555555555"}}`)}
-	headers := http.Header{}
-	headers.Set(helps.ClaudeCodeSessionHeader, "session-from-header")
-	upstreamBody := []byte(`{"input":[{"type":"message"}],"prompt_cache_key":"abcdef123456"}`)
-
-	recordCacheLossRequestInfo(ctx, auth, req, upstreamBody, req.Payload, headers)
-
-	value, ok := ginCtx.Get("CACHE_LOSS_REQUEST_INFO")
-	if !ok {
-		t.Fatal("expected cache-loss request info in gin context")
-	}
-	got := reflect.ValueOf(value)
-	if !got.FieldByName("TKLiteSessionKeyPresent").Bool() {
-		t.Fatal("expected tklite session key flag")
-	}
-}
-
-func TestRecordCacheLossRequestInfoStoresSafeBreadcrumbs(t *testing.T) {
-	gin.SetMode(gin.TestMode)
-	ginCtx, _ := gin.CreateTestContext(httptest.NewRecorder())
-	ctx := context.WithValue(context.Background(), "gin", ginCtx)
-	auth := &cliproxyauth.Auth{ID: "auth-123", Attributes: map[string]string{"api_key": "sk-secret"}}
-	req := cliproxyexecutor.Request{Payload: []byte(`{"metadata":{"user_id":"_session_11111111-2222-3333-4444-555555555555"}}`)}
-	headers := http.Header{}
-	headers.Set(helps.ClaudeCodeSessionHeader, "session-from-header")
-	upstreamBody := []byte(`{"input":[{"type":"message"}],"tools":[{"type":"function","name":"search"}],"prompt_cache_key":"abcdef123456","store":false,"previous_response_id":"resp-1"}`)
-
-	recordCacheLossRequestInfo(ctx, auth, req, upstreamBody, req.Payload, headers)
-
-	value, ok := ginCtx.Get("CACHE_LOSS_REQUEST_INFO")
-	if !ok {
-		t.Fatal("expected cache-loss request info in gin context")
-	}
-	got := reflect.ValueOf(value)
-	if got.FieldByName("SessionID").String() != "session-from-header" {
-		t.Fatalf("session id = %q, want header session", got.FieldByName("SessionID").String())
-	}
-	if !got.FieldByName("TKLiteSessionKeyPresent").Bool() {
-		t.Fatalf("diagnostic flags missing: %#v", value)
-	}
-	if got.FieldByName("PromptCacheKeyPrefix").String() == "abcdef12" {
-		t.Fatalf("prompt cache key prefix leaked raw prefix: %q", got.FieldByName("PromptCacheKeyPrefix").String())
 	}
 }
 

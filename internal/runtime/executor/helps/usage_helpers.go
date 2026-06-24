@@ -241,7 +241,6 @@ func (r *UsageReporter) EnsurePublished(ctx context.Context) {
 
 func (r *UsageReporter) publishRecord(ctx context.Context, record usage.Record) {
 	record.ResponseHeaders = internallogging.GetResponseHeaders(ctx)
-	logCacheLossDiagnostic(ctx, record)
 	usage.PublishRecord(ctx, record)
 }
 
