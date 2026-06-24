@@ -257,6 +257,49 @@ func (s codexReasoningReplayScope) valid() bool {
 	return strings.TrimSpace(s.modelName) != "" && strings.TrimSpace(s.sessionKey) != ""
 }
 
+func codexShouldRetryWithoutPreviousResponseID(statusCode int, upstreamBody []byte, originalPayloadSource []byte) bool {
+	return statusCode == http.StatusBadRequest &&
+		strings.TrimSpace(gjson.GetBytes(upstreamBody, "previous_response_id").String()) != "" &&
+		strings.TrimSpace(gjson.GetBytes(originalPayloadSource, "previous_response_id").String()) == ""
+}
+
+func clearCodexSessionResponseID(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, headers http.Header, reason string) {
+	if sessionKey := cacheOptSessionResponseKey(auth, req, headers); sessionKey != "" {
+		helps.DeleteSessionResponseID(sessionKey)
+		helps.LogWithRequestID(ctx).Debugf("cleared stale response_id for session (%s)", reason)
+	}
+}
+
+func (e *CodexExecutor) retryCodexWithoutPreviousResponseID(ctx context.Context, from sdktranslator.Format, url string, auth *cliproxyauth.Auth, apiKey string, req cliproxyexecutor.Request, originalPayloadSource []byte, body []byte, headers http.Header, authID string, authLabel string, authType string, authValue string, httpClient *http.Client, stream bool) (*http.Response, []byte, codexIdentityConfuseState, []byte, error) {
+	clearCodexSessionResponseID(ctx, auth, req, headers, "generic_400_after_previous_response_id")
+	body, _ = sjson.DeleteBytes(body, "previous_response_id")
+	httpReq, upstreamBody, identityState, err := e.cacheHelper(ctx, from, url, auth, req, originalPayloadSource, body)
+	if err != nil {
+		return nil, nil, codexIdentityConfuseState{}, body, err
+	}
+	applyCodexHeaders(httpReq, auth, apiKey, stream, e.cfg)
+	applyCodexIdentityConfuseHeaders(httpReq.Header, &identityState)
+	recordCodexCacheLossRequestInfo(ctx, auth, req, upstreamBody, originalPayloadSource, headers)
+	helps.RecordAPIRequest(ctx, e.cfg, helps.UpstreamRequestLog{
+		URL:       url,
+		Method:    http.MethodPost,
+		Headers:   httpReq.Header.Clone(),
+		Body:      upstreamBody,
+		Provider:  e.Identifier(),
+		AuthID:    authID,
+		AuthLabel: authLabel,
+		AuthType:  authType,
+		AuthValue: authValue,
+	})
+	httpResp, err := httpClient.Do(httpReq)
+	if err != nil {
+		helps.RecordAPIResponseError(ctx, e.cfg, err)
+		return nil, nil, codexIdentityConfuseState{}, body, err
+	}
+	helps.RecordAPIResponseMetadata(ctx, e.cfg, httpResp.StatusCode, httpResp.Header.Clone())
+	return httpResp, upstreamBody, identityState, body, nil
+}
+
 func applyCodexReasoningReplayCache(ctx context.Context, from sdktranslator.Format, req cliproxyexecutor.Request, opts cliproxyexecutor.Options, body []byte) ([]byte, codexReasoningReplayScope) {
 	updated, scope, _ := applyCodexReasoningReplayCacheRequired(ctx, from, req, opts, body)
 	return updated, scope
@@ -804,7 +847,7 @@ func (e *CodexExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, re
 
 	// tklite cache optimization
 	body = tklite.Optimize(ctx, e.cfg, "/v1/responses", body, CacheOptTKLiteHeaders(auth, req, opts.Headers))
-	body = CacheOptPostTKLite(auth, body, req, originalPayloadSource)
+	body = CacheOptPostTKLite(auth, body, req, originalPayloadSource, opts.Headers)
 
 	url := strings.TrimSuffix(baseURL, "/") + "/responses"
 	var identityState codexIdentityConfuseState
@@ -820,6 +863,7 @@ func (e *CodexExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, re
 		authLabel = auth.Label
 		authType, authValue = auth.AccountInfo()
 	}
+	recordCodexCacheLossRequestInfo(ctx, auth, req, upstreamBody, originalPayloadSource, opts.Headers)
 	helps.RecordAPIRequest(ctx, e.cfg, helps.UpstreamRequestLog{
 		URL:       url,
 		Method:    http.MethodPost,
@@ -844,16 +888,23 @@ func (e *CodexExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, re
 		}
 	}()
 	helps.RecordAPIResponseMetadata(ctx, e.cfg, httpResp.StatusCode, httpResp.Header.Clone())
+	if codexShouldRetryWithoutPreviousResponseID(httpResp.StatusCode, upstreamBody, originalPayloadSource) {
+		if errClose := httpResp.Body.Close(); errClose != nil {
+			log.Errorf("codex executor: close response body before retry error: %v", errClose)
+		}
+		retryResp, retryBody, retryIdentityState, retryRequestBody, errRetry := e.retryCodexWithoutPreviousResponseID(ctx, from, url, auth, apiKey, req, originalPayloadSource, body, opts.Headers, authID, authLabel, authType, authValue, httpClient, true)
+		if errRetry != nil {
+			return resp, errRetry
+		}
+		httpResp, upstreamBody, identityState, body = retryResp, retryBody, retryIdentityState, retryRequestBody
+	}
 	if httpResp.StatusCode < 200 || httpResp.StatusCode >= 300 {
 		b, _ := io.ReadAll(httpResp.Body)
 		b = applyCodexIdentityConfuseResponsePayload(b, identityState)
 		// Clear stale previous_response_id so the next request in this
 		// session does not re-inject a deleted upstream response.
 		if code, _, ok := codexStatusErrorClassification(httpResp.StatusCode, b); ok && code == "previous_response_not_found" {
-			if sessionKey := cacheOptSessionResponseKey(auth, req); sessionKey != "" {
-				helps.DeleteSessionResponseID(sessionKey)
-				helps.LogWithRequestID(ctx).Debugf("cleared stale response_id for session (error_code=%s)", code)
-			}
+			clearCodexSessionResponseID(ctx, auth, req, opts.Headers, "error_code="+code)
 		}
 		if errClearReplay := clearCodexReasoningReplayOnInvalidSignature(ctx, replayScope, httpResp.StatusCode, b); errClearReplay != nil {
 			return resp, errClearReplay
@@ -936,7 +987,7 @@ func (e *CodexExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, re
 			completedData = completedDataPatched
 		}
 		cacheCodexReasoningReplayFromCompleted(replayScope, completedData)
-		CacheOptStoreResponseID(auth, req, completedData)
+		CacheOptStoreResponseID(auth, req, completedData, opts.Headers)
 
 		var param any
 		clientCompletedData := applyCodexIdentityExposeResponsePayload(completedData, identityState)
@@ -991,7 +1042,7 @@ func (e *CodexExecutor) executeCompact(ctx context.Context, auth *cliproxyauth.A
 	reporter.SetTranslatedReasoningEffort(body, to.String())
 
 	body = tklite.Optimize(ctx, e.cfg, "/v1/responses", body, CacheOptTKLiteHeaders(auth, req, opts.Headers))
-	body = CacheOptPostTKLite(auth, body, req, originalPayloadSource)
+	body = CacheOptPostTKLite(auth, body, req, originalPayloadSource, opts.Headers)
 
 	url := strings.TrimSuffix(baseURL, "/") + "/responses/compact"
 	var identityState codexIdentityConfuseState
@@ -1007,6 +1058,7 @@ func (e *CodexExecutor) executeCompact(ctx context.Context, auth *cliproxyauth.A
 		authLabel = auth.Label
 		authType, authValue = auth.AccountInfo()
 	}
+	recordCodexCacheLossRequestInfo(ctx, auth, req, upstreamBody, originalPayloadSource, opts.Headers)
 	helps.RecordAPIRequest(ctx, e.cfg, helps.UpstreamRequestLog{
 		URL:       url,
 		Method:    http.MethodPost,
@@ -1031,16 +1083,23 @@ func (e *CodexExecutor) executeCompact(ctx context.Context, auth *cliproxyauth.A
 		}
 	}()
 	helps.RecordAPIResponseMetadata(ctx, e.cfg, httpResp.StatusCode, httpResp.Header.Clone())
+	if codexShouldRetryWithoutPreviousResponseID(httpResp.StatusCode, upstreamBody, originalPayloadSource) {
+		if errClose := httpResp.Body.Close(); errClose != nil {
+			log.Errorf("codex executor: close response body before retry error: %v", errClose)
+		}
+		retryResp, retryBody, retryIdentityState, retryRequestBody, errRetry := e.retryCodexWithoutPreviousResponseID(ctx, from, url, auth, apiKey, req, originalPayloadSource, body, opts.Headers, authID, authLabel, authType, authValue, httpClient, false)
+		if errRetry != nil {
+			return resp, errRetry
+		}
+		httpResp, upstreamBody, identityState, body = retryResp, retryBody, retryIdentityState, retryRequestBody
+	}
 	if httpResp.StatusCode < 200 || httpResp.StatusCode >= 300 {
 		b, _ := io.ReadAll(httpResp.Body)
 		b = applyCodexIdentityConfuseResponsePayload(b, identityState)
 		// Clear stale previous_response_id so the next request in this
 		// session does not re-inject a deleted upstream response.
 		if code, _, ok := codexStatusErrorClassification(httpResp.StatusCode, b); ok && code == "previous_response_not_found" {
-			if sessionKey := cacheOptSessionResponseKey(auth, req); sessionKey != "" {
-				helps.DeleteSessionResponseID(sessionKey)
-				helps.LogWithRequestID(ctx).Debugf("cleared stale response_id for session (error_code=%s)", code)
-			}
+			clearCodexSessionResponseID(ctx, auth, req, opts.Headers, "error_code="+code)
 		}
 		helps.AppendAPIResponseChunk(ctx, e.cfg, b)
 		helps.LogWithRequestID(ctx).Debugf("request error, error status: %d, error message: %s", httpResp.StatusCode, helps.SummarizeErrorBody(httpResp.Header.Get("Content-Type"), b))
@@ -1053,7 +1112,7 @@ func (e *CodexExecutor) executeCompact(ctx context.Context, auth *cliproxyauth.A
 		return resp, err
 	}
 	upstreamData := applyCodexIdentityConfuseResponsePayload(data, identityState)
-	CacheOptStoreResponseID(auth, req, upstreamData)
+	CacheOptStoreResponseID(auth, req, upstreamData, opts.Headers)
 	helps.AppendAPIResponseChunk(ctx, e.cfg, upstreamData)
 	reporter.Publish(ctx, helps.ParseOpenAIUsage(upstreamData))
 	reporter.EnsurePublished(ctx)
@@ -1121,7 +1180,7 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 
 	// tklite cache optimization
 	body = tklite.Optimize(ctx, e.cfg, "/v1/responses", body, CacheOptTKLiteHeaders(auth, req, opts.Headers))
-	body = CacheOptPostTKLite(auth, body, req, originalPayloadSource)
+	body = CacheOptPostTKLite(auth, body, req, originalPayloadSource, opts.Headers)
 
 	url := strings.TrimSuffix(baseURL, "/") + "/responses"
 	var identityState codexIdentityConfuseState
@@ -1137,6 +1196,7 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 		authLabel = auth.Label
 		authType, authValue = auth.AccountInfo()
 	}
+	recordCodexCacheLossRequestInfo(ctx, auth, req, upstreamBody, originalPayloadSource, opts.Headers)
 	helps.RecordAPIRequest(ctx, e.cfg, helps.UpstreamRequestLog{
 		URL:       url,
 		Method:    http.MethodPost,
@@ -1157,6 +1217,16 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 		return nil, err
 	}
 	helps.RecordAPIResponseMetadata(ctx, e.cfg, httpResp.StatusCode, httpResp.Header.Clone())
+	if codexShouldRetryWithoutPreviousResponseID(httpResp.StatusCode, upstreamBody, originalPayloadSource) {
+		if errClose := httpResp.Body.Close(); errClose != nil {
+			log.Errorf("codex executor: close response body before retry error: %v", errClose)
+		}
+		retryResp, retryBody, retryIdentityState, retryRequestBody, errRetry := e.retryCodexWithoutPreviousResponseID(ctx, from, url, auth, apiKey, req, originalPayloadSource, body, opts.Headers, authID, authLabel, authType, authValue, httpClient, true)
+		if errRetry != nil {
+			return nil, errRetry
+		}
+		httpResp, upstreamBody, identityState, body = retryResp, retryBody, retryIdentityState, retryRequestBody
+	}
 	if httpResp.StatusCode < 200 || httpResp.StatusCode >= 300 {
 		data, readErr := io.ReadAll(httpResp.Body)
 		if errClose := httpResp.Body.Close(); errClose != nil {
@@ -1170,10 +1240,7 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 		// Clear stale previous_response_id so the next request in this
 		// session does not re-inject a deleted upstream response.
 		if code, _, ok := codexStatusErrorClassification(httpResp.StatusCode, data); ok && code == "previous_response_not_found" {
-			if sessionKey := cacheOptSessionResponseKey(auth, req); sessionKey != "" {
-				helps.DeleteSessionResponseID(sessionKey)
-				helps.LogWithRequestID(ctx).Debugf("cleared stale response_id for session (error_code=%s)", code)
-			}
+			clearCodexSessionResponseID(ctx, auth, req, opts.Headers, "error_code="+code)
 		}
 		if errClearReplay := clearCodexReasoningReplayOnInvalidSignature(ctx, replayScope, httpResp.StatusCode, data); errClearReplay != nil {
 			return nil, errClearReplay
@@ -1231,7 +1298,7 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 					publishCodexImageToolUsage(ctx, reporter, body, data)
 					data = patchCodexCompletedOutput(data, outputItemsByIndex, outputItemsFallback)
 					cacheCodexReasoningReplayFromCompleted(replayScope, data)
-					CacheOptStoreResponseID(auth, req, data)
+					CacheOptStoreResponseID(auth, req, data, opts.Headers)
 					translatedLine = append([]byte("data: "), data...)
 				}
 			}
