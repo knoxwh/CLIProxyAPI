@@ -30,6 +30,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/home"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/logging"
+	helpscacheregression "github.com/router-for-me/CLIProxyAPI/v7/internal/runtime/executor/helps/cacheregression"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/managementasset"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/pluginhost"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/redisqueue"
@@ -1606,6 +1607,7 @@ func (s *Server) UpdateClients(cfg *config.Config) {
 			log.Errorf("failed to reconfigure log output: %v", err)
 		}
 	}
+	helpscacheregression.DefaultTracker.Configure(logging.ResolveLogDirectory(cfg))
 
 	if oldCfg == nil || oldCfg.UsageStatisticsEnabled != cfg.UsageStatisticsEnabled {
 		redisqueue.SetUsageStatisticsEnabled(cfg.UsageStatisticsEnabled)

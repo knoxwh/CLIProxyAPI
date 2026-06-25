@@ -208,6 +208,9 @@ func (e *ClaudeExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 	}
 
 	reporter := helps.NewExecutorUsageReporter(ctx, e, baseModel, auth)
+	if e.cfg != nil && e.cfg.CacheRegression.Enabled {
+		reporter.SetCacheRegressionEnabled(true)
+	}
 	defer reporter.TrackFailure(ctx, &err)
 	from := opts.SourceFormat
 	responseFormat := cliproxyexecutor.ResponseFormatOrSource(opts)
@@ -282,6 +285,11 @@ func (e *ClaudeExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 		bodyForUpstream = signAnthropicMessagesBody(bodyForUpstream)
 	}
 	reporter.SetTranslatedReasoningEffort(bodyForUpstream, to.String())
+	if e.cfg != nil && e.cfg.CacheRegression.Enabled {
+		if rc, ok := helps.CacheRegressionKey(ctx, req.Payload, opts.Headers, auth); ok {
+			reporter.SetCacheRegressionContext(rc, bodyForUpstream)
+		}
+	}
 
 	url := fmt.Sprintf("%s/v1/messages?beta=true", baseURL)
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(bodyForUpstream))
@@ -404,6 +412,9 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 	}
 
 	reporter := helps.NewExecutorUsageReporter(ctx, e, baseModel, auth)
+	if e.cfg != nil && e.cfg.CacheRegression.Enabled {
+		reporter.SetCacheRegressionEnabled(true)
+	}
 	defer reporter.TrackFailure(ctx, &err)
 	from := opts.SourceFormat
 	responseFormat := cliproxyexecutor.ResponseFormatOrSource(opts)
@@ -472,6 +483,11 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 		bodyForUpstream = signAnthropicMessagesBody(bodyForUpstream)
 	}
 	reporter.SetTranslatedReasoningEffort(bodyForUpstream, to.String())
+	if e.cfg != nil && e.cfg.CacheRegression.Enabled {
+		if rc, ok := helps.CacheRegressionKey(ctx, req.Payload, opts.Headers, auth); ok {
+			reporter.SetCacheRegressionContext(rc, bodyForUpstream)
+		}
+	}
 
 	url := fmt.Sprintf("%s/v1/messages?beta=true", baseURL)
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(bodyForUpstream))

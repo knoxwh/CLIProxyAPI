@@ -24,6 +24,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/home"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/homeplugins"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/logging"
+	helpscacheregression "github.com/router-for-me/CLIProxyAPI/v7/internal/runtime/executor/helps/cacheregression"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/managementasset"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/misc"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/pluginhost"
@@ -524,6 +525,7 @@ func main() {
 		log.Errorf("failed to configure log output: %v", err)
 		return
 	}
+	helpscacheregression.DefaultTracker.Configure(logging.ResolveLogDirectory(cfg))
 
 	log.Infof("CLIProxyAPI Version: %s, Commit: %s, BuiltAt: %s", buildinfo.Version, buildinfo.Commit, buildinfo.BuildDate)
 

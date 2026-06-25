@@ -14,6 +14,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 	internallogging "github.com/router-for-me/CLIProxyAPI/v7/internal/logging"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/runtime/executor/helps/cacheregression"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/thinking"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/usage"
@@ -39,6 +40,10 @@ type UsageReporter struct {
 	ttftStart    time.Time
 	ttftSet      bool
 	once         sync.Once
+
+	regressionEnabled bool
+	regressionCtx     CacheRegressionContext
+	regressionBody    []byte
 }
 
 type usageExecutor interface {
@@ -53,6 +58,25 @@ func NewExecutorUsageReporter(ctx context.Context, executor usageExecutor, model
 	reporter := NewUsageReporter(ctx, provider, model, auth)
 	reporter.executorType = ExecutorTypeName(executor)
 	return reporter
+}
+
+// SetCacheRegressionEnabled toggles per-request regression detection. Called
+// by executors that opt in (currently the Claude executor), gated by config.
+func (r *UsageReporter) SetCacheRegressionEnabled(enabled bool) {
+	if r == nil {
+		return
+	}
+	r.regressionEnabled = enabled
+}
+
+// SetCacheRegressionContext attaches the cache-bucket key and the upstream-bound
+// request body snapshot so publishWithOutcome can run the regression check.
+func (r *UsageReporter) SetCacheRegressionContext(ctx CacheRegressionContext, body []byte) {
+	if r == nil || ctx.Key == "" {
+		return
+	}
+	r.regressionCtx = ctx
+	r.regressionBody = body
 }
 
 func NewUsageReporter(ctx context.Context, provider, model string, auth *cliproxyauth.Auth) *UsageReporter {
@@ -203,6 +227,20 @@ func (r *UsageReporter) publishWithOutcome(ctx context.Context, detail usage.Det
 	detail = normalizeUsageDetailTotal(detail)
 	r.once.Do(func() {
 		r.publishRecord(ctx, r.buildRecord(detail, failed, fail))
+		if r.regressionEnabled && r.regressionCtx.Key != "" && detail.OutputTokens > 0 {
+			cacheregression.DefaultTracker.Record(
+				r.regressionCtx.Key,
+				detail.CacheReadTokens,
+				r.regressionBody,
+				cacheregression.Meta{
+					AuthID:     r.regressionCtx.AuthID,
+					SessionID:  r.regressionCtx.SessionID,
+					SystemHash: r.regressionCtx.SystemHash,
+					Model:      r.model,
+					Provider:   r.provider,
+				},
+			)
+		}
 	})
 }
 
