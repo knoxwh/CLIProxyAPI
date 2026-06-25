@@ -8,13 +8,16 @@ import (
 	"time"
 )
 
+const cacheRegressionMaxLogSizeBytes int64 = 10 * 1024 * 1024
+
 var logFileMu sync.Map // path -> *sync.Mutex
 
 func writeRegressionLog(logDir, key string, cacheRead int64, body []byte, e *entry, meta Meta) {
 	if e == nil {
 		return
 	}
-	name := "cache-regression-" + time.Now().Format("2006-01-02") + ".log"
+	now := time.Now()
+	name := "cache-regression-" + now.Format("2006-01-02") + ".log"
 	path := filepath.Join(logDir, name)
 
 	mu := loadFileMu(path)
@@ -25,6 +28,7 @@ func writeRegressionLog(logDir, key string, cacheRead int64, body []byte, e *ent
 		fmt.Fprintf(os.Stderr, "cacheregression: mkdir %s failed: %v\n", logDir, err)
 		return
 	}
+	path = regressionLogPathBeforeWrite(logDir, path, now)
 	f, err := os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "cacheregression: open %s failed: %v\n", path, err)
@@ -47,6 +51,15 @@ func writeRegressionLog(logDir, key string, cacheRead int64, body []byte, e *ent
 	fmt.Fprintf(f, "--- PREVIOUS REQUEST BODY (last hit, cache_read=%d) ---\n", e.prevRead)
 	fmt.Fprintf(f, "%s\n", string(e.prevBody))
 	fmt.Fprintf(f, "=== END ===\n\n")
+}
+
+func regressionLogPathBeforeWrite(logDir, basePath string, now time.Time) string {
+	info, err := os.Stat(basePath)
+	if err != nil || info.Size() < cacheRegressionMaxLogSizeBytes {
+		return basePath
+	}
+	name := "cache-regression-" + now.Format("2006-01-02-0102150405") + ".log"
+	return filepath.Join(logDir, name)
 }
 
 func loadFileMu(path string) *sync.Mutex {

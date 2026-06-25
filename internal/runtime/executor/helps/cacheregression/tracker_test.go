@@ -3,6 +3,7 @@ package cacheregression
 import (
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"sync"
 	"testing"
@@ -141,5 +142,50 @@ func TestLogFileNameUsesToday(t *testing.T) {
 	want := "cache-regression-" + time.Now().Format("2006-01-02") + ".log"
 	if _, err := os.Stat(filepath.Join(dir, want)); err != nil {
 		t.Fatalf("expected file %s: %v", want, err)
+	}
+}
+
+func TestRecord_FullDailyLog_RotatesToTimestampedFile(t *testing.T) {
+	tr, dir := newTestTracker(t)
+	baseName := "cache-regression-" + time.Now().Format("2006-01-02") + ".log"
+	basePath := filepath.Join(dir, baseName)
+	if err := os.WriteFile(basePath, []byte("seed"), 0o644); err != nil {
+		t.Fatalf("seed base log: %v", err)
+	}
+	if err := os.Truncate(basePath, 10*1024*1024); err != nil {
+		t.Fatalf("truncate base log: %v", err)
+	}
+
+	tr.Record("k", 15000, []byte(`{"body":"prev-hit"}`), Meta{AuthID: "a", SessionID: "s", SystemHash: "h", Model: "m"})
+	tr.Record("k", 8000, []byte(`{"body":"curr-drop"}`), Meta{AuthID: "a", SessionID: "s", SystemHash: "h", Model: "m"})
+
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatalf("readdir: %v", err)
+	}
+	var rotatedName string
+	pattern := regexp.MustCompile(`^cache-regression-\d{4}-\d{2}-\d{2}-\d{10}\.log$`)
+	for _, entry := range entries {
+		if pattern.MatchString(entry.Name()) {
+			rotatedName = entry.Name()
+			break
+		}
+	}
+	if rotatedName == "" {
+		t.Fatalf("expected timestamped rotation file in %v", entries)
+	}
+	if _, err := os.Stat(filepath.Join(dir, baseName)); err != nil {
+		t.Fatalf("base log missing: %v", err)
+	}
+	rotatedData, err := os.ReadFile(filepath.Join(dir, rotatedName))
+	if err != nil {
+		t.Fatalf("read rotated log: %v", err)
+	}
+	s := string(rotatedData)
+	if !strings.Contains(s, "prev=15000") || !strings.Contains(s, "curr=8000") {
+		t.Fatalf("rotated log missing regression data:\n%s", s)
+	}
+	if !strings.Contains(s, `{"body":"prev-hit"}`) || !strings.Contains(s, `{"body":"curr-drop"}`) {
+		t.Fatalf("rotated log missing body content:\n%s", s)
 	}
 }
