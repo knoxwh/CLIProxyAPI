@@ -164,8 +164,20 @@ type Config struct {
 	// TKLite configures the optional tklite cache optimization service.
 	TKLite TKLiteConfig `yaml:"tklite" json:"tklite"`
 
+	// CacheRegression enables detection of cache_read_input_tokens regressions
+	// within the same auth+session+system_hash bucket. When a regression is
+	// observed, the current and previous upstream request bodies are written to a
+	// dedicated log file under the logs directory. Default off.
+	CacheRegression CacheRegressionConfig `yaml:"cache-regression" json:"cache-regression"`
+
 	// Payload defines default and override rules for provider payload parameters.
 	Payload PayloadConfig `yaml:"payload" json:"payload"`
+}
+
+// CacheRegressionConfig configures cache-read regression detection.
+type CacheRegressionConfig struct {
+	// Enabled toggles the detector.
+	Enabled bool `yaml:"enabled" json:"enabled"`
 }
 
 // PluginsConfig holds dynamic plugin system settings.
@@ -707,6 +719,7 @@ func LoadConfigOptional(configFile string, optional bool) (*Config, error) {
 	cfg.RemoteManagement.PanelGitHubRepository = DefaultPanelGitHubRepository
 	cfg.TKLite.Enabled = false
 	cfg.TKLite.Socket = "/tmp/tklite.sock"
+	cfg.CacheRegression.Enabled = false
 	if err = yaml.Unmarshal(data, &cfg); err != nil {
 		if optional {
 			// In cloud deploy mode, if YAML parsing fails, return empty config instead of error.

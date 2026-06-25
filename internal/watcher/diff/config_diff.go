@@ -63,6 +63,9 @@ func BuildConfigChangeDetails(oldCfg, newCfg *config.Config) []string {
 	if oldCfg.RequestLog != newCfg.RequestLog {
 		changes = append(changes, fmt.Sprintf("request-log: %t -> %t", oldCfg.RequestLog, newCfg.RequestLog))
 	}
+	if oldCfg.CacheRegression.Enabled != newCfg.CacheRegression.Enabled {
+		changes = append(changes, fmt.Sprintf("cache-regression.enabled: %t -> %t", oldCfg.CacheRegression.Enabled, newCfg.CacheRegression.Enabled))
+	}
 	if oldCfg.LogsMaxTotalSizeMB != newCfg.LogsMaxTotalSizeMB {
 		changes = append(changes, fmt.Sprintf("logs-max-total-size-mb: %d -> %d", oldCfg.LogsMaxTotalSizeMB, newCfg.LogsMaxTotalSizeMB))
 	}
