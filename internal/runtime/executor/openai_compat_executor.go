@@ -112,9 +112,6 @@ func (e *OpenAICompatExecutor) Execute(ctx context.Context, auth *cliproxyauth.A
 		originalPayloadSource = opts.OriginalRequest
 	}
 	originalPayload := originalPayloadSource
-	// PR-F0: strip historical <system-reminder> blocks from Claude-native
-	// body BEFORE protocol translation (gate from==claude).
-	ApplyReminderStripIfClaude(ctx, e.cfg, from, &req, auth, opts.Headers)
 	originalTranslated := sdktranslator.TranslateRequest(from, to, baseModel, originalPayload, opts.Stream)
 	translated := sdktranslator.TranslateRequest(from, to, baseModel, req.Payload, opts.Stream)
 
@@ -332,9 +329,6 @@ func (e *OpenAICompatExecutor) ExecuteStream(ctx context.Context, auth *cliproxy
 		originalPayloadSource = opts.OriginalRequest
 	}
 	originalPayload := originalPayloadSource
-	// PR-F0: strip historical <system-reminder> blocks from Claude-native
-	// body BEFORE protocol translation (gate from==claude).
-	ApplyReminderStripIfClaude(ctx, e.cfg, from, &req, auth, opts.Headers)
 	originalTranslated := sdktranslator.TranslateRequest(from, to, baseModel, originalPayload, true)
 	translated := sdktranslator.TranslateRequest(from, to, baseModel, req.Payload, true)
 
