@@ -147,6 +147,13 @@ func (e *OpenAICompatExecutor) Execute(ctx context.Context, auth *cliproxyauth.A
 		translated = updated
 	}
 
+	if e.cfg != nil && e.cfg.CacheRegression.Enabled {
+		reporter.SetCacheRegressionEnabled(true)
+		if rc, ok := helps.CacheRegressionKeyOpenAI(ctx, translated, opts.Headers, auth); ok {
+			reporter.SetCacheRegressionContext(rc, translated)
+		}
+	}
+
 	url := strings.TrimSuffix(baseURL, "/") + endpoint
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(translated))
 	if err != nil {
@@ -352,6 +359,13 @@ func (e *OpenAICompatExecutor) ExecuteStream(ctx context.Context, auth *cliproxy
 	// tklite re-injects prompt_cache_retention; upstream rejects it with HTTP 400.
 	if updated, errDelete := sjson.DeleteBytes(translated, "prompt_cache_retention"); errDelete == nil {
 		translated = updated
+	}
+
+	if e.cfg != nil && e.cfg.CacheRegression.Enabled {
+		reporter.SetCacheRegressionEnabled(true)
+		if rc, ok := helps.CacheRegressionKeyOpenAI(ctx, translated, opts.Headers, auth); ok {
+			reporter.SetCacheRegressionContext(rc, translated)
+		}
 	}
 
 	url := strings.TrimSuffix(baseURL, "/") + "/chat/completions"

@@ -543,7 +543,12 @@ func parseOpenAIStyleUsageNode(usageNode gjson.Result) usage.Detail {
 		cached = usageNode.Get("input_tokens_details.cached_tokens")
 	}
 	if cached.Exists() {
-		detail.CachedTokens = cached.Int()
+		// OpenAI-compatible providers report cache hits via cached_tokens. Mirror it
+		// into CacheReadTokens so the cache-regression detector (which keys on
+		// CacheReadTokens) can observe OpenAI/Codex paths, not just Claude.
+		cachedInt := cached.Int()
+		detail.CachedTokens = cachedInt
+		detail.CacheReadTokens = cachedInt
 	}
 	reasoning := usageNode.Get("completion_tokens_details.reasoning_tokens")
 	if !reasoning.Exists() {

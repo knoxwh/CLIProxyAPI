@@ -26,6 +26,9 @@ func TestParseOpenAIUsageChatCompletions(t *testing.T) {
 	if detail.CachedTokens != 4 {
 		t.Fatalf("cached tokens = %d, want %d", detail.CachedTokens, 4)
 	}
+	if detail.CacheReadTokens != 4 {
+		t.Fatalf("cache read tokens = %d, want %d (OpenAI cached_tokens must populate CacheReadTokens for regression detection)", detail.CacheReadTokens, 4)
+	}
 	if detail.ReasoningTokens != 5 {
 		t.Fatalf("reasoning tokens = %d, want %d", detail.ReasoningTokens, 5)
 	}
@@ -45,6 +48,9 @@ func TestParseOpenAIUsageResponses(t *testing.T) {
 	}
 	if detail.CachedTokens != 7 {
 		t.Fatalf("cached tokens = %d, want %d", detail.CachedTokens, 7)
+	}
+	if detail.CacheReadTokens != 7 {
+		t.Fatalf("cache read tokens = %d, want %d (Responses cached_tokens must populate CacheReadTokens for regression detection)", detail.CacheReadTokens, 7)
 	}
 	if detail.ReasoningTokens != 9 {
 		t.Fatalf("reasoning tokens = %d, want %d", detail.ReasoningTokens, 9)

@@ -811,6 +811,12 @@ func (e *CodexExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, re
 	}
 	applyCodexHeaders(httpReq, auth, apiKey, true, e.cfg)
 	applyCodexIdentityConfuseHeaders(httpReq.Header, &identityState)
+	if e.cfg != nil && e.cfg.CacheRegression.Enabled {
+		reporter.SetCacheRegressionEnabled(true)
+		if rc, ok := helps.CacheRegressionKeyOpenAI(ctx, upstreamBody, opts.Headers, auth); ok {
+			reporter.SetCacheRegressionContext(rc, upstreamBody)
+		}
+	}
 	var authID, authLabel, authType, authValue string
 	if auth != nil {
 		authID = auth.ID
@@ -1104,6 +1110,12 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 	}
 	applyCodexHeaders(httpReq, auth, apiKey, true, e.cfg)
 	applyCodexIdentityConfuseHeaders(httpReq.Header, &identityState)
+	if e.cfg != nil && e.cfg.CacheRegression.Enabled {
+		reporter.SetCacheRegressionEnabled(true)
+		if rc, ok := helps.CacheRegressionKeyOpenAI(ctx, upstreamBody, opts.Headers, auth); ok {
+			reporter.SetCacheRegressionContext(rc, upstreamBody)
+		}
+	}
 	var authID, authLabel, authType, authValue string
 	if auth != nil {
 		authID = auth.ID
