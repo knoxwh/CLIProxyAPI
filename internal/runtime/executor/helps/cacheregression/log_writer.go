@@ -58,8 +58,16 @@ func regressionLogPathBeforeWrite(logDir, basePath string, now time.Time) string
 	if err != nil || info.Size() < cacheRegressionMaxLogSizeBytes {
 		return basePath
 	}
-	name := "cache-regression-" + now.Format("2006-01-02-0102150405") + ".log"
-	return filepath.Join(logDir, name)
+	// Rotate: rename the full base file with a timestamp suffix, then keep
+	// writing a fresh base file so the active log always has the stable name.
+	rotated := "cache-regression-" + now.Format("200601021504") + ".log"
+	rotatedPath := filepath.Join(logDir, rotated)
+	if err := os.Rename(basePath, rotatedPath); err != nil {
+		// Rename failed (e.g. cross-device or target exists); fall back to
+		// writing the rotated path directly so the write still lands.
+		return rotatedPath
+	}
+	return basePath
 }
 
 func loadFileMu(path string) *sync.Mutex {

@@ -164,7 +164,7 @@ func TestRecord_FullDailyLog_RotatesToTimestampedFile(t *testing.T) {
 		t.Fatalf("readdir: %v", err)
 	}
 	var rotatedName string
-	pattern := regexp.MustCompile(`^cache-regression-\d{4}-\d{2}-\d{2}-\d{10}\.log$`)
+	pattern := regexp.MustCompile(`^cache-regression-\d{12}\.log$`)
 	for _, entry := range entries {
 		if pattern.MatchString(entry.Name()) {
 			rotatedName = entry.Name()
@@ -174,18 +174,20 @@ func TestRecord_FullDailyLog_RotatesToTimestampedFile(t *testing.T) {
 	if rotatedName == "" {
 		t.Fatalf("expected timestamped rotation file in %v", entries)
 	}
+	// After rotation the base file is recreated fresh and receives the new
+	// regression entries; the rotated file holds the pre-rotation content.
 	if _, err := os.Stat(filepath.Join(dir, baseName)); err != nil {
 		t.Fatalf("base log missing: %v", err)
 	}
-	rotatedData, err := os.ReadFile(filepath.Join(dir, rotatedName))
+	baseData, err := os.ReadFile(filepath.Join(dir, baseName))
 	if err != nil {
-		t.Fatalf("read rotated log: %v", err)
+		t.Fatalf("read base log: %v", err)
 	}
-	s := string(rotatedData)
+	s := string(baseData)
 	if !strings.Contains(s, "prev=15000") || !strings.Contains(s, "curr=8000") {
-		t.Fatalf("rotated log missing regression data:\n%s", s)
+		t.Fatalf("base log missing regression data:\n%s", s)
 	}
 	if !strings.Contains(s, `{"body":"prev-hit"}`) || !strings.Contains(s, `{"body":"curr-drop"}`) {
-		t.Fatalf("rotated log missing body content:\n%s", s)
+		t.Fatalf("base log missing body content:\n%s", s)
 	}
 }
