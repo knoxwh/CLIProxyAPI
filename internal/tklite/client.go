@@ -75,11 +75,12 @@ func Optimize(ctx context.Context, cfg *config.Config, endpoint string, body []b
 // forwardHeaders lists headers relevant to tklite optimization.
 // Secrets (x-api-key, authorization) and public session identifiers
 // (x-headroom-session-id) are not forwarded to the sidecar.
+//
+// Only headers CPA actually sets are listed. The legacy x-headroom-bypass,
+// x-client, and x-request-id were never set by CPA, so tklite's reads of
+// them were dead; they have been removed from both sides.
 var forwardHeaders = []string{
 	"anthropic-beta",
-	"x-headroom-bypass",
-	"x-client",
-	"x-request-id",
 	"x-tklite-session-key",
 }
 
