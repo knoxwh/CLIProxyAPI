@@ -49,15 +49,24 @@ func (t *Tracker) Configure(logDir string) {
 // Record observes one cache_read value for a bucket. On a regression (cacheRead
 // below the bucket's historical max, with a prior non-zero baseline), it writes
 // the current and previous request bodies to the regression log.
+//
+// A zero cacheRead is a meaningful observation: once a non-zero baseline exists,
+// a drop to zero means the cache was lost entirely and is logged as a regression.
+// Only a zero on the very first sighting is skipped (no baseline to regress from).
 func (t *Tracker) Record(key string, cacheRead int64, body []byte, meta Meta) {
-	if t == nil || key == "" || cacheRead == 0 {
+	if t == nil || key == "" {
 		return
 	}
 	e := t.loadOrCreate(key)
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	if e.maxRead == 0 {
-		// first sighting: establish baseline
+		// No baseline yet. A zero first sighting cannot establish one; skip
+		// until we see a non-zero value to regress from.
+		if cacheRead == 0 {
+			return
+		}
+		// first non-zero sighting: establish baseline
 		e.maxRead = cacheRead
 		e.prevRead = cacheRead
 		e.prevBody = body
@@ -72,7 +81,7 @@ func (t *Tracker) Record(key string, cacheRead int64, body []byte, meta Meta) {
 		e.prevTime = time.Now()
 		return
 	}
-	// regression
+	// regression: cacheRead < maxRead (includes drop-to-zero)
 	writeRegressionLog(t.logDirPath(), key, cacheRead, body, e, meta)
 	e.prevRead = cacheRead
 	e.prevBody = body

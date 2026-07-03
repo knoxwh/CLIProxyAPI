@@ -54,11 +54,29 @@ func TestRecord_Regression_WritesBothBodies(t *testing.T) {
 	}
 }
 
-func TestRecord_ZeroCacheRead_Skipped(t *testing.T) {
+func TestRecord_FirstSightingZero_NoBaseline_NoLog(t *testing.T) {
 	tr, dir := newTestTracker(t)
 	tr.Record("k", 0, []byte(`{}`), Meta{})
 	if files, _ := filepath.Glob(filepath.Join(dir, "cache-regression-*.log")); len(files) != 0 {
-		t.Fatalf("zero cache_read must not log, got %v", files)
+		t.Fatalf("first-sighting zero must not establish baseline or log, got %v", files)
+	}
+}
+
+func TestRecord_DropToZero_AfterBaseline_WritesRegression(t *testing.T) {
+	tr, dir := newTestTracker(t)
+	tr.Record("k", 15000, []byte(`{"body":"prev-hit"}`), Meta{AuthID: "a", SessionID: "s", SystemHash: "h", Model: "m"})
+	tr.Record("k", 0, []byte(`{"body":"curr-zero"}`), Meta{AuthID: "a", SessionID: "s", SystemHash: "h", Model: "m"})
+	files, _ := filepath.Glob(filepath.Join(dir, "cache-regression-*.log"))
+	if len(files) != 1 {
+		t.Fatalf("expected 1 log file on drop-to-zero, got %v", files)
+	}
+	data, _ := os.ReadFile(files[0])
+	s := string(data)
+	if !strings.Contains(s, "prev=15000") || !strings.Contains(s, "curr=0") || !strings.Contains(s, "delta=-15000") {
+		t.Fatalf("log missing drop-to-zero numbers:\n%s", s)
+	}
+	if !strings.Contains(s, `{"body":"prev-hit"}`) || !strings.Contains(s, `{"body":"curr-zero"}`) {
+		t.Fatalf("log missing one of the bodies:\n%s", s)
 	}
 }
 
