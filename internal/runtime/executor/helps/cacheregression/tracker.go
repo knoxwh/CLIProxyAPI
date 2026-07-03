@@ -6,7 +6,6 @@ package cacheregression
 import (
 	"sync"
 	"sync/atomic"
-	"time"
 )
 
 // Meta decorates a regression log entry with identifying context.
@@ -21,13 +20,12 @@ type Meta struct {
 
 type entry struct {
 	mu       sync.Mutex
-	maxRead  int64
-	prevRead int64
+	maxRead  int64 // historical peak, for display only
+	prevRead int64 // last turn's cache_read, the regression baseline
 	prevBody []byte
-	prevTime time.Time
 }
 
-// Tracker holds per-bucket historical max cache_read and the last request body.
+// Tracker holds per-bucket cache_read history and the last request body.
 type Tracker struct {
 	m      sync.Map // key -> *entry
 	logDir atomic.Pointer[string]
@@ -46,13 +44,12 @@ func (t *Tracker) Configure(logDir string) {
 	t.logDir.Store(&s)
 }
 
-// Record observes one cache_read value for a bucket. On a regression (cacheRead
-// below the bucket's historical max, with a prior non-zero baseline), it writes
-// the current and previous request bodies to the regression log.
+// Record observes one cache_read value for a bucket. A regression is a drop
+// from the previous turn's cache_read (cacheRead < prevRead), including a drop
+// to zero. Recovery turns (cacheRead >= prevRead) do not log, so a cache that
+// is rebuilding does not spam the log. maxRead is tracked only for display.
 //
-// A zero cacheRead is a meaningful observation: once a non-zero baseline exists,
-// a drop to zero means the cache was lost entirely and is logged as a regression.
-// Only a zero on the very first sighting is skipped (no baseline to regress from).
+// A zero on the very first sighting is skipped (no prior turn to regress from).
 func (t *Tracker) Record(key string, cacheRead int64, body []byte, meta Meta) {
 	if t == nil || key == "" {
 		return
@@ -60,32 +57,24 @@ func (t *Tracker) Record(key string, cacheRead int64, body []byte, meta Meta) {
 	e := t.loadOrCreate(key)
 	e.mu.Lock()
 	defer e.mu.Unlock()
-	if e.maxRead == 0 {
-		// No baseline yet. A zero first sighting cannot establish one; skip
-		// until we see a non-zero value to regress from.
-		if cacheRead == 0 {
-			return
-		}
-		// first non-zero sighting: establish baseline
-		e.maxRead = cacheRead
-		e.prevRead = cacheRead
-		e.prevBody = body
-		e.prevTime = time.Now()
+
+	// No baseline yet: a zero first sighting cannot establish one, skip until
+	// we see a non-zero value to regress from.
+	if e.prevRead == 0 && cacheRead == 0 {
 		return
 	}
-	if cacheRead >= e.maxRead {
-		// monotonic OK; advance
-		e.maxRead = cacheRead
-		e.prevRead = cacheRead
-		e.prevBody = body
-		e.prevTime = time.Now()
-		return
+
+	if e.prevRead > 0 && cacheRead < e.prevRead {
+		// regression: drop from previous turn (includes drop-to-zero)
+		writeRegressionLog(t.logDirPath(), key, cacheRead, body, e, meta)
 	}
-	// regression: cacheRead < maxRead (includes drop-to-zero)
-	writeRegressionLog(t.logDirPath(), key, cacheRead, body, e, meta)
+
+	// Advance baseline; track peak for display.
+	if cacheRead > e.maxRead {
+		e.maxRead = cacheRead
+	}
 	e.prevRead = cacheRead
 	e.prevBody = body
-	e.prevTime = time.Now()
 }
 
 func (t *Tracker) loadOrCreate(key string) *entry {

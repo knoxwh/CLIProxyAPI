@@ -36,9 +36,9 @@ func writeRegressionLog(logDir, key string, cacheRead int64, body []byte, e *ent
 	}
 	defer f.Close()
 
-	delta := cacheRead - e.maxRead
+	delta := cacheRead - e.prevRead
 	fmt.Fprintf(f, "=== CACHE REGRESSION ===\n")
-	fmt.Fprintf(f, "Timestamp:      %s\n", time.Now().Format("2006-01-02T15:04:05Z07:00"))
+	fmt.Fprintf(f, "Timestamp:      %s\n", now.Format("2006-01-02T15:04:05Z07:00"))
 	fmt.Fprintf(f, "Auth:           %s (%s)\n", meta.AuthID, meta.AuthLabel)
 	fmt.Fprintf(f, "Session:        %s\n", meta.SessionID)
 	fmt.Fprintf(f, "SystemHash:     %s\n", meta.SystemHash)

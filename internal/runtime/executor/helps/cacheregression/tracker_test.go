@@ -80,6 +80,33 @@ func TestRecord_DropToZero_AfterBaseline_WritesRegression(t *testing.T) {
 	}
 }
 
+func TestRecord_RecoveryAfterDrop_DoesNotLog(t *testing.T) {
+	tr, dir := newTestTracker(t)
+	tr.Record("k", 15000, []byte(`{"i":1}`), Meta{}) // baseline
+	tr.Record("k", 8000, []byte(`{"i":2}`), Meta{})  // drop: logs once
+	tr.Record("k", 10000, []byte(`{"i":3}`), Meta{}) // recovery: 10000 >= prevRead 8000, no log
+	tr.Record("k", 12000, []byte(`{"i":4}`), Meta{}) // recovery: 12000 >= prevRead 10000, no log
+	files, _ := filepath.Glob(filepath.Join(dir, "cache-regression-*.log"))
+	if len(files) != 1 {
+		t.Fatalf("expected 1 log file (drop only, recovery suppressed), got %v", files)
+	}
+	data, _ := os.ReadFile(files[0])
+	if strings.Count(string(data), "=== CACHE REGRESSION ===") != 1 {
+		t.Fatalf("expected single regression entry, got:\n%s", data)
+	}
+}
+
+func TestRecord_DropBelowMaxButAbovePrev_DoesNotLog(t *testing.T) {
+	tr, dir := newTestTracker(t)
+	tr.Record("k", 15000, []byte(`{"i":1}`), Meta{}) // baseline, max=15000
+	tr.Record("k", 8000, []byte(`{"i":2}`), Meta{})  // drop: logs, prevRead=8000
+	tr.Record("k", 12000, []byte(`{"i":3}`), Meta{}) // 12000 < max 15000 but >= prevRead 8000: no log
+	files, _ := filepath.Glob(filepath.Join(dir, "cache-regression-*.log"))
+	if len(files) != 1 {
+		t.Fatalf("expected 1 log file (recovery below max must not log), got %v", files)
+	}
+}
+
 func TestRecord_EmptyKey_Skipped(t *testing.T) {
 	tr, dir := newTestTracker(t)
 	tr.Record("", 1000, []byte(`{}`), Meta{})
