@@ -765,6 +765,15 @@ func clearPendingCodexFunctionCalls(params *ConvertCodexResponseToClaudeParams) 
 func finalizeCodexOpenContentBlocks(params *ConvertCodexResponseToClaudeParams) []byte {
 	output := make([]byte, 0, 256)
 	output = append(output, finalizeCodexThinkingBlock(params)...)
+	// thinking-only turn: upstream produced reasoning but no text content. The
+	// Claude SSE stream must still carry a text content block — clients like
+	// Claude Code fail with "Content block not found" when the assistant turn
+	// contains only thinking. Synthesize an empty text block (open then stop)
+	// so the stream is well-formed. Skip when tool use was emitted, since a
+	// tool-call turn legitimately has no text block.
+	if !params.TextBlockOpen && !params.HasTextDelta && !params.HasEmittedToolUse && (params.ThinkingSummarySeen || params.ThinkingSignature != "") {
+		output = append(output, startCodexTextBlock(params)...)
+	}
 	output = append(output, stopCodexTextBlock(params)...)
 	output = appendCodexOpenFunctionCallStop(output, params)
 	return output

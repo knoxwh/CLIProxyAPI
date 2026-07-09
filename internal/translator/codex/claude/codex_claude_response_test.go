@@ -171,6 +171,54 @@ func TestConvertCodexResponseToClaude_StreamThinkingWithoutReasoningItemStillInc
 	}
 }
 
+// TestConvertCodexResponseToClaude_StreamThinkingOnlyEmptiesTextBlock
+// guards against "Content block not found" failures: when the upstream turn
+// contains only reasoning (no text delta, no tool use), the translator must
+// still synthesize an empty text content block so the Claude SSE stream carries
+// a text content part — clients like Claude Code expect one and fail otherwise.
+func TestConvertCodexResponseToClaude_StreamThinkingOnlyEmptiesTextBlock(t *testing.T) {
+	ctx := context.Background()
+	originalRequest := []byte(`{"messages":[]}`)
+	var param any
+
+	chunks := [][]byte{
+		[]byte("data: {\"type\":\"response.reasoning_summary_part.added\"}"),
+		[]byte("data: {\"type\":\"response.reasoning_summary_text.delta\",\"delta\":\"only reasoning\"}"),
+		[]byte("data: {\"type\":\"response.reasoning_summary_part.done\"}"),
+		[]byte("data: {\"type\":\"response.completed\",\"response\":{\"usage\":{\"input_tokens\":1,\"output_tokens\":1}}}"),
+	}
+
+	var outputs [][]byte
+	for _, chunk := range chunks {
+		outputs = append(outputs, ConvertCodexResponseToClaude(ctx, "", originalRequest, nil, chunk, &param)...)
+	}
+
+	textStartFound := false
+	textStopFound := false
+	textStartIndex := int64(-1)
+	for _, out := range outputs {
+		for _, line := range strings.Split(string(out), "\n") {
+			if !strings.HasPrefix(line, "data: ") {
+				continue
+			}
+			data := gjson.Parse(strings.TrimPrefix(line, "data: "))
+			if data.Get("type").String() == "content_block_start" && data.Get("content_block.type").String() == "text" {
+				textStartFound = true
+				textStartIndex = data.Get("index").Int()
+			}
+			if data.Get("type").String() == "content_block_stop" && data.Get("index").Int() == textStartIndex {
+				textStopFound = true
+			}
+		}
+	}
+	if !textStartFound {
+		t.Fatal("expected a text content_block_start event for thinking-only turn")
+	}
+	if !textStopFound {
+		t.Fatal("expected a text content_block_stop event for thinking-only turn")
+	}
+}
+
 func TestConvertCodexResponseToClaude_StreamThinkingFinalizesPendingBlockBeforeNextSummaryPart(t *testing.T) {
 	ctx := context.Background()
 	originalRequest := []byte(`{"messages":[]}`)
