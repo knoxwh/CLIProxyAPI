@@ -37,7 +37,7 @@ import (
 
 const (
 	codexOriginator            = "codex_cli_rs"
-	codexUserAgent             = "codex_cli_rs/0.142.0 (Mac OS 26.5.1; aarch64) iTerm.app/3.6.10"
+	codexUserAgent             = "codex_cli_rs/0.144.1 (Mac OS 26.5.1; aarch64) iTerm.app/3.6.10"
 	codexDefaultImageToolModel = "gpt-image-2"
 )
 
