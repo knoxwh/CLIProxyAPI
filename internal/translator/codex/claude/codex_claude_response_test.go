@@ -1100,6 +1100,54 @@ func TestConvertCodexResponseToClaude_StreamStopSequenceMapping(t *testing.T) {
 	}
 }
 
+// TestConvertCodexResponseToClaude_StreamTextThenReasoningNoBlockOverlap
+// covers upstream streams that emit text before reasoning. Claude SSE content
+// blocks must close before the next block starts.
+func TestConvertCodexResponseToClaude_StreamTextThenReasoningNoBlockOverlap(t *testing.T) {
+	ctx := context.Background()
+	originalRequest := []byte(`{"messages":[]}`)
+	var param any
+
+	chunks := [][]byte{
+		[]byte("data: {\"type\":\"response.created\",\"response\":{\"id\":\"resp_1\",\"model\":\"gpt-5.6-sol\"}}"),
+		[]byte("data: {\"type\":\"response.output_text.delta\",\"delta\":\"hi\"}"),
+		[]byte("data: {\"type\":\"response.reasoning_summary_part.added\"}"),
+		[]byte("data: {\"type\":\"response.reasoning_summary_text.delta\",\"delta\":\"thinking\"}"),
+		[]byte("data: {\"type\":\"response.reasoning_summary_part.done\"}"),
+		[]byte("data: {\"type\":\"response.completed\",\"response\":{\"usage\":{\"input_tokens\":1,\"output_tokens\":1}}}"),
+	}
+
+	var outputs [][]byte
+	for _, chunk := range chunks {
+		outputs = append(outputs, ConvertCodexResponseToClaude(ctx, "", originalRequest, nil, chunk, &param)...)
+	}
+
+	openBlock := false
+	for _, out := range outputs {
+		for _, line := range strings.Split(string(out), "\n") {
+			if !strings.HasPrefix(line, "data: ") {
+				continue
+			}
+			data := gjson.Parse(strings.TrimPrefix(line, "data: "))
+			switch data.Get("type").String() {
+			case "content_block_start":
+				if openBlock {
+					t.Fatalf("content_block_start emitted while another block is open: %s", line)
+				}
+				openBlock = true
+			case "content_block_stop":
+				if !openBlock {
+					t.Fatalf("content_block_stop emitted without an open block: %s", line)
+				}
+				openBlock = false
+			}
+		}
+	}
+	if openBlock {
+		t.Fatal("content block remained open after response.completed")
+	}
+}
+
 func TestConvertCodexResponseToClaudeNonStream_WebSearchCallEmitsServerToolBlocks(t *testing.T) {
 	ctx := context.Background()
 	originalRequest := []byte(`{"tools":[{"type":"web_search_20250305","name":"web_search"}],"messages":[{"role":"user","content":"search weather"}]}`)
