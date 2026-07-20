@@ -232,7 +232,9 @@ func (e *XAIExecutor) executeCompact(ctx context.Context, auth *cliproxyauth.Aut
 
 func (e *XAIExecutor) executeCompactRequest(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (*xaiPreparedRequest, []byte, http.Header, error) {
 	token, _ := xaiCreds(auth)
-	baseURL := xaiChatBaseURL(auth)
+	// Compact must not use xaiChatBaseURL: CLI chat-proxy returns 404 for
+	// /responses/compact and a 404 cools down the whole xAI auth pool.
+	baseURL := xaiCompactBaseURL(auth)
 	logXAIResolvedBaseURL(ctx, baseURL)
 
 	prepared, err := e.prepareResponsesRequestTo(ctx, req, opts, false, sdktranslator.FormatOpenAIResponse)
@@ -252,7 +254,9 @@ func (e *XAIExecutor) executeCompactRequest(ctx context.Context, auth *cliproxya
 	if err != nil {
 		return nil, nil, nil, err
 	}
-	applyXAIChatHeaders(httpReq, auth, token, false, prepared.sessionID)
+	// Official API / custom compact endpoints use standard API headers, not CLI
+	// chat-proxy identity headers (which applyXAIChatHeaders may still attach for OAuth chat).
+	applyXAIHeaders(httpReq, auth, token, false, prepared.sessionID)
 	e.recordXAIRequest(ctx, auth, requestURL, httpReq.Header.Clone(), prepared.body)
 
 	httpClient := helps.NewProxyAwareHTTPClient(ctx, e.cfg, auth, 0)
@@ -911,6 +915,7 @@ func (e *XAIExecutor) prepareResponsesRequestTo(ctx context.Context, req cliprox
 	// the post-restore (namespace, short-name) shape used by the response filter.
 	clientDeclaredTools := collectXAIClientDeclaredToolKeys(body)
 	body = normalizeXAITools(body)
+	body = promoteXAIAdditionalTools(body)
 	// Drop choices that point at tools removed by normalizeXAITools before we
 	// inject native x_search, so a surviving allowed_tools / forced choice is not
 	// left pointing at a deleted tool once only x_search remains.
@@ -1033,8 +1038,9 @@ func xaiUsingAPI(auth *cliproxyauth.Auth) bool {
 // is false (including its OAuth default), empty or official default base_url is
 // rewritten to the CLI chat-proxy endpoint; an explicit non-default base_url is
 // still honored.
-// Websocket transport intentionally does not use this helper: cli-chat-proxy only
-// accepts HTTP POST and returns 405 for websocket upgrades.
+// Websocket and compact transports intentionally do not use this helper:
+// cli-chat-proxy only accepts HTTP POST chat and does not implement
+// /responses/compact (404) or websocket upgrades (405).
 func xaiChatBaseURL(auth *cliproxyauth.Auth) string {
 	_, baseURL := xaiCreds(auth)
 	if xaiUsingAPI(auth) {
@@ -1047,6 +1053,18 @@ func xaiChatBaseURL(auth *cliproxyauth.Auth) string {
 		return baseURL
 	}
 	return xaiauth.CLIChatProxyBaseURL
+}
+
+// xaiCompactBaseURL returns the base URL for xAI /responses/compact requests.
+// Compact must stay on the official API (or an explicit non-CLI-proxy base_url).
+// Reusing xaiChatBaseURL would pin OAuth traffic to cli-chat-proxy, which returns
+// 404 for /responses/compact and then cools down the auth pool as not_found.
+func xaiCompactBaseURL(auth *cliproxyauth.Auth) string {
+	_, baseURL := xaiCreds(auth)
+	if baseURL == "" || xaiIsCLIChatProxyBaseURL(baseURL) {
+		return xaiauth.DefaultAPIBaseURL
+	}
+	return baseURL
 }
 
 func xaiNormalizeBaseURL(baseURL string) string {
@@ -1133,7 +1151,7 @@ func xaiResolveComposerSessionID(ctx context.Context, req cliproxyexecutor.Reque
 	if !xaiRequiresIsolatedConversation(baseModel) {
 		return "", nil
 	}
-	cached, ok, errCache := helps.ClaudeCodePromptCache(ctx, req.Model, req.Payload, opts.Headers)
+	cached, ok, errCache := helps.ClaudeCodePromptCache(ctx, baseModel, req.Payload, opts.Headers)
 	if errCache != nil {
 		return "", errCache
 	}
@@ -1520,6 +1538,64 @@ func normalizeXAITools(body []byte) []byte {
 	return body
 }
 
+// promoteXAIAdditionalTools moves Responses Lite tool declarations to the
+// top-level tools array because xAI does not accept additional_tools input items.
+func promoteXAIAdditionalTools(body []byte) []byte {
+	if !gjson.ValidBytes(body) {
+		return body
+	}
+	input := gjson.GetBytes(body, "input")
+	if !input.IsArray() {
+		return body
+	}
+
+	inputItems := input.Array()
+	remainingInput := make([]json.RawMessage, 0, len(inputItems))
+	promotedTools := make([]json.RawMessage, 0)
+	for _, item := range inputItems {
+		if item.Get("type").String() != "additional_tools" {
+			remainingInput = append(remainingInput, json.RawMessage(item.Raw))
+			continue
+		}
+		for _, tool := range item.Get("tools").Array() {
+			promotedTools = append(promotedTools, json.RawMessage(tool.Raw))
+		}
+	}
+	if len(remainingInput) == len(inputItems) {
+		return body
+	}
+
+	rawInput, errMarshalInput := json.Marshal(remainingInput)
+	if errMarshalInput != nil {
+		return body
+	}
+	updated, errSetInput := sjson.SetRawBytes(body, "input", rawInput)
+	if errSetInput != nil {
+		return body
+	}
+	if len(promotedTools) == 0 {
+		return updated
+	}
+
+	topLevelTools := gjson.GetBytes(updated, "tools")
+	tools := make([]json.RawMessage, 0, len(topLevelTools.Array())+len(promotedTools))
+	if topLevelTools.IsArray() {
+		for _, tool := range topLevelTools.Array() {
+			tools = append(tools, json.RawMessage(tool.Raw))
+		}
+	}
+	tools = append(tools, promotedTools...)
+	rawTools, errMarshalTools := json.Marshal(tools)
+	if errMarshalTools != nil {
+		return body
+	}
+	updated, errSetTools := sjson.SetRawBytes(updated, "tools", rawTools)
+	if errSetTools != nil {
+		return body
+	}
+	return updated
+}
+
 func normalizeXAIToolArray(tools gjson.Result) ([]byte, bool, bool) {
 	changed := false
 	filtered := []byte(`[]`)
@@ -1649,11 +1725,25 @@ func normalizeXAITool(tool gjson.Result, namespaceName string) ([]byte, bool, bo
 	if toolType == xaiToolSearchType || toolType == xaiImageGenerationToolType {
 		return nil, true, true
 	}
+	if toolType == xaiCustomToolType && tool.Get("name").String() == "apply_patch" {
+		return nil, true, true
+	}
+
 	raw := []byte(tool.Raw)
-	if toolType == xaiCustomToolType {
-		if tool.Get("name").String() == "apply_patch" {
-			return nil, true, true
+	schemaTool := tool
+	if toolType == xaiFunctionToolType || toolType == xaiCustomToolType {
+		updatedTool, schemaChanged, ok := normalizeXAIObjectRootUnionBranchTypes(raw)
+		if !ok {
+			return nil, false, false
 		}
+		raw = updatedTool
+		if schemaChanged {
+			schemaTool = gjson.ParseBytes(raw)
+			changed = true
+			log.Debugf("xai: added object types to root union branches for tool %s.%s", namespaceName, tool.Get("name").String())
+		}
+	}
+	if toolType == xaiCustomToolType {
 		updatedTool, errSet := sjson.SetBytes(raw, "type", xaiFunctionToolType)
 		if errSet != nil {
 			return nil, false, false
@@ -1670,7 +1760,7 @@ func normalizeXAITool(tool gjson.Result, namespaceName string) ([]byte, bool, bo
 		raw = updatedTool
 		changed = true
 	}
-	if toolType == xaiFunctionToolType && !tool.Get("parameters").Exists() {
+	if toolType == xaiFunctionToolType && !schemaTool.Get("parameters").Exists() {
 		updatedTool, errSet := sjson.SetRawBytes(raw, "parameters", []byte(`{"type":"object","properties":{}}`))
 		if errSet != nil {
 			return nil, false, false
@@ -1680,7 +1770,7 @@ func normalizeXAITool(tool gjson.Result, namespaceName string) ([]byte, bool, bo
 	}
 	// Simplify the Codex Desktop automation schema and root unions that xAI
 	// rejects because function parameters must resolve exclusively to objects.
-	if toolType == xaiFunctionToolType && xaiFunctionParametersNeedSimplification(tool, namespaceName) {
+	if toolType == xaiFunctionToolType && xaiFunctionParametersNeedSimplification(schemaTool, namespaceName) {
 		updatedTool, errSet := sjson.SetRawBytes(raw, "parameters", []byte(xaiSafeFunctionParameters))
 		if errSet != nil {
 			return nil, false, false
@@ -2184,6 +2274,57 @@ func restoreXAINamespaceToolCallAtPath(data []byte, path string, refs map[string
 	return updated
 }
 
+// normalizeXAIObjectRootUnionBranchTypes makes untyped root union branches
+// explicitly object-only when the parameter root already permits only objects.
+// This preserves the original schema semantics while satisfying xAI validation.
+func normalizeXAIObjectRootUnionBranchTypes(tool []byte) ([]byte, bool, bool) {
+	parameters := gjson.GetBytes(tool, "parameters")
+	rootType := parameters.Get("type")
+	if rootType.Type != gjson.String || rootType.String() != "object" {
+		return tool, false, true
+	}
+
+	original := tool
+	changed := false
+	for _, unionName := range []string{"anyOf", "oneOf"} {
+		union := parameters.Get(unionName)
+		if !union.IsArray() {
+			continue
+		}
+		for index, branch := range union.Array() {
+			if !branch.IsObject() || branch.Get("type").Exists() {
+				continue
+			}
+			updated, errSet := sjson.SetBytes(tool, fmt.Sprintf("parameters.%s.%d.type", unionName, index), "object")
+			if errSet != nil {
+				return original, false, false
+			}
+			tool = updated
+			changed = true
+		}
+	}
+	return tool, changed, true
+}
+
+func xaiSchemaTypeIsObjectOnly(schemaType gjson.Result) bool {
+	if schemaType.Type == gjson.String {
+		return strings.EqualFold(strings.TrimSpace(schemaType.String()), "object")
+	}
+	if !schemaType.IsArray() {
+		return false
+	}
+	types := schemaType.Array()
+	if len(types) == 0 {
+		return false
+	}
+	for _, schemaTypeItem := range types {
+		if schemaTypeItem.Type != gjson.String || !strings.EqualFold(strings.TrimSpace(schemaTypeItem.String()), "object") {
+			return false
+		}
+	}
+	return true
+}
+
 // xaiFunctionParametersNeedSimplification reports whether a function tool, or
 // a custom tool normalized to a function, has a schema that xAI cannot accept.
 func xaiFunctionParametersNeedSimplification(tool gjson.Result, namespaceName string) bool {
@@ -2209,26 +2350,8 @@ func xaiFunctionParametersNeedSimplification(tool gjson.Result, namespaceName st
 			continue
 		}
 		for _, branch := range union.Array() {
-			branchType := branch.Get("type")
-			if branchType.Type == gjson.String {
-				if !strings.EqualFold(strings.TrimSpace(branchType.String()), "object") {
-					return true
-				}
-				continue
-			}
-			if !branchType.IsArray() {
-				// Without an explicit object type, the branch may accept non-object
-				// values even when it only declares object-specific keywords.
+			if !xaiSchemaTypeIsObjectOnly(branch.Get("type")) {
 				return true
-			}
-			allowedTypes := branchType.Array()
-			if len(allowedTypes) == 0 {
-				return true
-			}
-			for _, allowedType := range allowedTypes {
-				if allowedType.Type != gjson.String || !strings.EqualFold(strings.TrimSpace(allowedType.String()), "object") {
-					return true
-				}
 			}
 		}
 	}
