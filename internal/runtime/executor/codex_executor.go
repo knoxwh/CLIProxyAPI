@@ -299,7 +299,17 @@ func NewCodexExecutor(cfg *config.Config) *CodexExecutor { return &CodexExecutor
 
 func (e *CodexExecutor) Identifier() string { return "codex" }
 
-func translateCodexRequestPair(from, to sdktranslator.Format, model string, originalPayload, payload []byte, stream bool) ([]byte, []byte) {
+func translateCodexRequestPair(ctx context.Context, cfg *config.Config, headers http.Header, from, to sdktranslator.Format, model string, originalPayload, payload []byte, stream bool) ([]byte, []byte) {
+	// PreTransform: when the source is Claude (CC) form, clean the
+	// history-normalization subset (smoosh/content_strip/tool_input/
+	// sort/rstrip) BEFORE translation so the translator sees a clean,
+	// cross-turn-stable Anthropic body. tklite.Optimize is fail-open
+	// (returns original body on any error), so a sidecar outage degrades
+	// to no cleaning, not a request failure. See docs §6.1.
+	if from == sdktranslator.FormatClaude {
+		originalPayload = tklite.Optimize(ctx, cfg, "/v1/pretransform/messages", originalPayload, headers)
+		payload = tklite.Optimize(ctx, cfg, "/v1/pretransform/messages", payload, headers)
+	}
 	if bytes.Equal(originalPayload, payload) {
 		body := sdktranslator.TranslateRequest(from, to, model, payload, stream)
 		return body, body
@@ -1134,7 +1144,7 @@ func (e *CodexExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, re
 		originalPayloadSource = opts.OriginalRequest
 	}
 	originalPayload := originalPayloadSource
-	originalTranslated, body := translateCodexRequestPair(from, to, baseModel, originalPayload, req.Payload, false)
+	originalTranslated, body := translateCodexRequestPair(ctx, e.cfg, CacheOptTKLiteHeaders(auth, req, opts.Headers), from, to, baseModel, originalPayload, req.Payload, false)
 
 	body, err = thinking.ApplyThinking(body, req.Model, from.String(), to.String(), e.Identifier())
 	if err != nil {
@@ -1310,7 +1320,7 @@ func (e *CodexExecutor) executeCompact(ctx context.Context, auth *cliproxyauth.A
 		originalPayloadSource = opts.OriginalRequest
 	}
 	originalPayload := originalPayloadSource
-	originalTranslated, body := translateCodexRequestPair(from, to, baseModel, originalPayload, req.Payload, false)
+	originalTranslated, body := translateCodexRequestPair(ctx, e.cfg, CacheOptTKLiteHeaders(auth, req, opts.Headers), from, to, baseModel, originalPayload, req.Payload, false)
 
 	body, err = thinking.ApplyThinking(body, req.Model, from.String(), to.String(), e.Identifier())
 	if err != nil {
@@ -1418,7 +1428,7 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 		originalPayloadSource = opts.OriginalRequest
 	}
 	originalPayload := originalPayloadSource
-	originalTranslated, body := translateCodexRequestPair(from, to, baseModel, originalPayload, req.Payload, true)
+	originalTranslated, body := translateCodexRequestPair(ctx, e.cfg, CacheOptTKLiteHeaders(auth, req, opts.Headers), from, to, baseModel, originalPayload, req.Payload, true)
 
 	body, err = thinking.ApplyThinking(body, req.Model, from.String(), to.String(), e.Identifier())
 	if err != nil {
@@ -1602,7 +1612,15 @@ func (e *CodexExecutor) CountTokens(ctx context.Context, auth *cliproxyauth.Auth
 	from := opts.SourceFormat
 	responseFormat := cliproxyexecutor.ResponseFormatOrSource(opts)
 	to := sdktranslator.FromString("codex")
-	body := sdktranslator.TranslateRequest(from, to, baseModel, req.Payload, false)
+	// PreTransform: clean the CC history-normalization subset before
+	// translation so the token count reflects the body actually sent
+	// upstream (which would be cleaned on the real request path). See
+	// docs §6.1.
+	payload := req.Payload
+	if from == sdktranslator.FormatClaude {
+		payload = tklite.Optimize(ctx, e.cfg, "/v1/pretransform/messages", payload, CacheOptTKLiteHeaders(auth, req, opts.Headers))
+	}
+	body := sdktranslator.TranslateRequest(from, to, baseModel, payload, false)
 
 	body, err := thinking.ApplyThinking(body, req.Model, from.String(), to.String(), e.Identifier())
 	if err != nil {

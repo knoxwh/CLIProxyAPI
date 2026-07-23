@@ -112,8 +112,18 @@ func (e *OpenAICompatExecutor) Execute(ctx context.Context, auth *cliproxyauth.A
 		originalPayloadSource = opts.OriginalRequest
 	}
 	originalPayload := originalPayloadSource
+	payload := req.Payload
+	// PreTransform: when the source is Claude (CC) form, clean the
+	// history-normalization subset before translation so the translator
+	// sees a clean, cross-turn-stable Anthropic body. tklite.Optimize is
+	// fail-open. See docs §6.2.
+	if from == sdktranslator.FormatClaude {
+		hdrs := CacheOptTKLiteHeaders(auth, req, opts.Headers)
+		originalPayload = tklite.Optimize(ctx, e.cfg, "/v1/pretransform/messages", originalPayload, hdrs)
+		payload = tklite.Optimize(ctx, e.cfg, "/v1/pretransform/messages", payload, hdrs)
+	}
 	originalTranslated := sdktranslator.TranslateRequest(from, to, baseModel, originalPayload, opts.Stream)
-	translated := sdktranslator.TranslateRequest(from, to, baseModel, req.Payload, opts.Stream)
+	translated := sdktranslator.TranslateRequest(from, to, baseModel, payload, opts.Stream)
 
 	translated, err = thinking.ApplyThinking(translated, req.Model, from.String(), to.String(), e.Identifier())
 	if err != nil {
@@ -216,9 +226,11 @@ func (e *OpenAICompatExecutor) Execute(ctx context.Context, auth *cliproxyauth.A
 	reporter.Publish(ctx, helps.ParseOpenAIUsage(body))
 	// Ensure we at least record the request even if upstream doesn't return usage
 	reporter.EnsurePublished(ctx)
-	// Translate response back to source format when needed
+	// Translate response back to source format when needed. Use the
+	// (PreTransform-cleaned) originalPayload, not opts.OriginalRequest,
+	// so the back-translator sees the same context the upstream received.
 	var param any
-	out := sdktranslator.TranslateNonStream(ctx, to, responseFormat, req.Model, opts.OriginalRequest, translated, body, &param)
+	out := sdktranslator.TranslateNonStream(ctx, to, responseFormat, req.Model, originalPayload, translated, body, &param)
 	resp = cliproxyexecutor.Response{Payload: out, Headers: httpResp.Header.Clone()}
 	return resp, nil
 }
@@ -336,8 +348,16 @@ func (e *OpenAICompatExecutor) ExecuteStream(ctx context.Context, auth *cliproxy
 		originalPayloadSource = opts.OriginalRequest
 	}
 	originalPayload := originalPayloadSource
+	payload := req.Payload
+	// PreTransform: clean CC history-normalization subset before
+	// translation. See docs §6.2.
+	if from == sdktranslator.FormatClaude {
+		hdrs := CacheOptTKLiteHeaders(auth, req, opts.Headers)
+		originalPayload = tklite.Optimize(ctx, e.cfg, "/v1/pretransform/messages", originalPayload, hdrs)
+		payload = tklite.Optimize(ctx, e.cfg, "/v1/pretransform/messages", payload, hdrs)
+	}
 	originalTranslated := sdktranslator.TranslateRequest(from, to, baseModel, originalPayload, true)
-	translated := sdktranslator.TranslateRequest(from, to, baseModel, req.Payload, true)
+	translated := sdktranslator.TranslateRequest(from, to, baseModel, payload, true)
 
 	translated, err = thinking.ApplyThinking(translated, req.Model, from.String(), to.String(), e.Identifier())
 	if err != nil {
@@ -462,8 +482,10 @@ func (e *OpenAICompatExecutor) ExecuteStream(ctx context.Context, auth *cliproxy
 				continue
 			}
 
-			// OpenAI-compatible streams must use SSE data lines.
-			chunks := helps.TranslateStreamWithClaudeInputTokens(ctx, to, responseFormat, req.Model, opts.OriginalRequest, translated, bytes.Clone(trimmedLine), &param, claudeInputTokens)
+			// OpenAI-compatible streams must use SSE data lines. Use the
+			// (PreTransform-cleaned) originalPayload for back-translation
+			// context, matching the body sent upstream.
+			chunks := helps.TranslateStreamWithClaudeInputTokens(ctx, to, responseFormat, req.Model, originalPayload, translated, bytes.Clone(trimmedLine), &param, claudeInputTokens)
 			for i := range chunks {
 				select {
 				case out <- cliproxyexecutor.StreamChunk{Payload: chunks[i]}:
@@ -483,7 +505,7 @@ func (e *OpenAICompatExecutor) ExecuteStream(ctx context.Context, auth *cliproxy
 			// In case the upstream close the stream without a terminal [DONE] marker.
 			// Feed a synthetic done marker through the translator so pending
 			// response.completed events are still emitted exactly once.
-			chunks := helps.TranslateStreamWithClaudeInputTokens(ctx, to, responseFormat, req.Model, opts.OriginalRequest, translated, []byte("data: [DONE]"), &param, claudeInputTokens)
+			chunks := helps.TranslateStreamWithClaudeInputTokens(ctx, to, responseFormat, req.Model, originalPayload, translated, []byte("data: [DONE]"), &param, claudeInputTokens)
 			for i := range chunks {
 				select {
 				case out <- cliproxyexecutor.StreamChunk{Payload: chunks[i]}:
@@ -622,7 +644,14 @@ func (e *OpenAICompatExecutor) CountTokens(ctx context.Context, auth *cliproxyau
 	from := opts.SourceFormat
 	responseFormat := cliproxyexecutor.ResponseFormatOrSource(opts)
 	to := sdktranslator.FromString("openai")
-	translated := sdktranslator.TranslateRequest(from, to, baseModel, req.Payload, false)
+	// PreTransform: clean CC history-normalization subset before translation
+	// so the token count reflects the body actually sent upstream (which
+	// would be cleaned on the real request path). See docs §6.2.
+	payload := req.Payload
+	if from == sdktranslator.FormatClaude {
+		payload = tklite.Optimize(ctx, e.cfg, "/v1/pretransform/messages", payload, CacheOptTKLiteHeaders(auth, req, opts.Headers))
+	}
+	translated := sdktranslator.TranslateRequest(from, to, baseModel, payload, false)
 
 	modelForCounting := baseModel
 
