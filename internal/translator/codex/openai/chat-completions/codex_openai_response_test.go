@@ -401,6 +401,11 @@ func TestConvertCodexResponseToOpenAI_NonStreamImageGenerationCallAddsMessageIma
 	if gotURL != "data:image/png;base64,aGVsbG8=" {
 		t.Fatalf("expected image url %q, got %q; chunk=%s", "data:image/png;base64,aGVsbG8=", gotURL, string(out))
 	}
+
+	gotFinishReason := gjson.GetBytes(out, "choices.0.finish_reason").String()
+	if gotFinishReason != "stop" {
+		t.Fatalf("expected finish_reason %q, got %q; resp=%s", "stop", gotFinishReason, string(out))
+	}
 }
 
 func TestConvertCodexResponseToOpenAI_StreamForwardsCacheWriteTokens(t *testing.T) {
@@ -515,7 +520,7 @@ func assertUsageMapping(t *testing.T, payload []byte, wantCachedCreation int64, 
 
 func TestConvertCodexResponseToOpenAI_NonStreamMultiMessageEmptyTrailingKeepsContent(t *testing.T) {
 	ctx := context.Background()
-	raw := []byte(`{"type":"response.completed","response":{"id":"resp_1","created_at":1700000000,"model":"gpt-5.5","status":"completed","usage":{"input_tokens":10,"output_tokens":5,"total_tokens":15},"output":[` +
+	raw := []byte(`{"type":"response.completed","response":{"id":"resp_1","created_at":1700000000,"model":"gpt-5.5","usage":{"input_tokens":10,"output_tokens":5,"total_tokens":15},"output":[` +
 		`{"type":"reasoning","summary":[{"type":"summary_text","text":"thinking"}]},` +
 		`{"type":"message","content":[{"type":"output_text","text":"the real answer"}]},` +
 		`{"type":"reasoning","summary":[{"type":"summary_text","text":"thinking again"}]},` +
