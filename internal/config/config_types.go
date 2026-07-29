@@ -95,6 +95,12 @@ func defaultPluginInstanceConfigNode() *yaml.Node {
 	}
 }
 
+// CacheRegressionConfig configures cache-read regression detection.
+type CacheRegressionConfig struct {
+	// Enabled toggles the detector.
+	Enabled bool `yaml:"enabled" json:"enabled"`
+}
+
 // ClaudeHeaderDefaults configures default header values injected into Claude API requests.
 // In legacy mode, UserAgent/PackageVersion/RuntimeVersion/Timeout act as fallbacks when
 // the client omits them, while OS/Arch remain runtime-derived. When stabilized device

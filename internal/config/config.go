@@ -158,6 +158,12 @@ type Config struct {
 	// TKLite configures the optional tklite cache optimization service.
 	TKLite TKLiteConfig `yaml:"tklite" json:"tklite"`
 
+	// CacheRegression enables detection of cache_read_input_tokens regressions
+	// within the same auth+session+system_hash bucket. When a regression is
+	// observed, the current and previous upstream request bodies are written to a
+	// dedicated log file under the logs directory. Default off.
+	CacheRegression CacheRegressionConfig `yaml:"cache-regression" json:"cache-regression"`
+
 	// Payload defines default and override rules for provider payload parameters.
 	Payload PayloadConfig `yaml:"payload" json:"payload"`
 }
