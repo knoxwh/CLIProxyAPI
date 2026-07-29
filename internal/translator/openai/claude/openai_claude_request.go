@@ -363,10 +363,16 @@ func normalizeObjectSchemaProperties(schema any) any {
 	}
 }
 
+// shouldMapClaudeThinkingToGPTReasoning reports whether a Claude thinking
+// block may be replayed to an OpenAI-compatible backend as reasoning_content.
+// Unsigned blocks pass: CPA's own response converter never emits
+// signature_delta, so same-link history thinking is always unsigned.
+// Signed blocks still require a GPT-compatible signature (aee7a5fb's
+// cross-provider dirty-signature guard preserved).
 func shouldMapClaudeThinkingToGPTReasoning(part gjson.Result) bool {
 	signature := part.Get("signature")
 	if !signature.Exists() || strings.TrimSpace(signature.String()) == "" {
-		return false
+		return true
 	}
 	_, ok := sigcompat.CompatibleSignatureForProvider(sigcompat.SignatureProviderGPT, signature.String())
 	return ok

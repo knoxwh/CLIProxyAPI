@@ -383,3 +383,223 @@ func TestStreamingTool_StopReasonMixedSuppressedAndValid(t *testing.T) {
 		t.Fatalf("stop_reason = %q, want %q", got, "tool_use")
 	}
 }
+
+func thinkingDeltaTexts(events []sseEvent) []string {
+	var out []string
+	for _, e := range events {
+		if e.Type != "content_block_delta" {
+			continue
+		}
+		if gjson.Get(e.Payload, "delta.type").String() == "thinking_delta" {
+			out = append(out, gjson.Get(e.Payload, "delta.thinking").String())
+		}
+	}
+	return out
+}
+
+func TestStreamingReasoning_DuplicateChunksDeduped(t *testing.T) {
+	events := runStream(t, streamReq,
+		`{"id":"c1","model":"m","choices":[{"index":0,"delta":{"role":"assistant","reasoning_content":"hello"}}]}`,
+		`{"id":"c1","model":"m","choices":[{"index":0,"delta":{"reasoning_content":"hello"}}]}`,
+		`{"id":"c1","model":"m","choices":[{"index":0,"delta":{"reasoning_content":"hello"}}]}`,
+		`{"id":"c1","model":"m","choices":[{"index":0,"delta":{"content":"world"},"finish_reason":"stop"}]}`,
+	)
+	got := thinkingDeltaTexts(events)
+	if len(got) != 1 || got[0] != "hello" {
+		t.Fatalf("expected single thinking delta [hello], got %v", got)
+	}
+}
+
+func TestStreamingReasoning_DistinctChunksAllEmitted(t *testing.T) {
+	events := runStream(t, streamReq,
+		`{"id":"c1","model":"m","choices":[{"index":0,"delta":{"role":"assistant","reasoning_content":"A"}}]}`,
+		`{"id":"c1","model":"m","choices":[{"index":0,"delta":{"reasoning_content":"B"}}]}`,
+		`{"id":"c1","model":"m","choices":[{"index":0,"delta":{"reasoning_content":"C"}}]}`,
+		`{"id":"c1","model":"m","choices":[{"index":0,"delta":{"content":"done"},"finish_reason":"stop"}]}`,
+	)
+	got := thinkingDeltaTexts(events)
+	if strings.Join(got, "") != "ABC" {
+		t.Fatalf("expected [A B C], got %v", got)
+	}
+}
+
+func TestStreamingReasoning_WhitespaceChunksSkipped(t *testing.T) {
+	events := runStream(t, streamReq,
+		`{"id":"c1","model":"m","choices":[{"index":0,"delta":{"role":"assistant","reasoning_content":"  "}}]}`,
+		`{"id":"c1","model":"m","choices":[{"index":0,"delta":{"reasoning_content":"real"}}]}`,
+		`{"id":"c1","model":"m","choices":[{"index":0,"delta":{"content":"done"},"finish_reason":"stop"}]}`,
+	)
+	got := thinkingDeltaTexts(events)
+	if len(got) != 1 || got[0] != "real" {
+		t.Fatalf("expected single thinking delta [real], got %v", got)
+	}
+}
+
+func TestStreamingReasoning_ArrayFormEachDeduped(t *testing.T) {
+	events := runStream(t, streamReq,
+		`{"id":"c1","model":"m","choices":[{"index":0,"delta":{"role":"assistant","reasoning_content":[{"text":"part1"},{"text":"part2"}]}}]}`,
+		`{"id":"c1","model":"m","choices":[{"index":0,"delta":{"reasoning_content":[{"text":"part1"},{"text":"part2"}]}}]}`,
+		`{"id":"c1","model":"m","choices":[{"index":0,"delta":{"content":"done"},"finish_reason":"stop"}]}`,
+	)
+	got := thinkingDeltaTexts(events)
+	if strings.Join(got, "") != "part1part2" {
+		t.Fatalf("expected [part1 part2] once, got %v", got)
+	}
+}
+
+func TestStreamingReasoning_ReasoningDetailsTextForm(t *testing.T) {
+	events := runStream(t, streamReq,
+		`{"id":"c1","model":"m","choices":[{"index":0,"delta":{"role":"assistant","reasoning_details":[{"type":"reasoning.text","text":"hello"}]}}]}`,
+		`{"id":"c1","model":"m","choices":[{"index":0,"delta":{"content":"done"},"finish_reason":"stop"}]}`,
+	)
+	got := thinkingDeltaTexts(events)
+	if len(got) != 1 || got[0] != "hello" {
+		t.Fatalf("expected [hello], got %v", got)
+	}
+}
+
+func TestStreamingReasoning_ReasoningDetailsSummaryForms(t *testing.T) {
+	// summary as string field
+	events := runStream(t, streamReq,
+		`{"id":"c1","model":"m","choices":[{"index":0,"delta":{"role":"assistant","reasoning_details":[{"type":"reasoning.summary","summary":"sum1"}]}}]}`,
+		`{"id":"c1","model":"m","choices":[{"index":0,"delta":{"content":"done"},"finish_reason":"stop"}]}`,
+	)
+	if got := thinkingDeltaTexts(events); len(got) != 1 || got[0] != "sum1" {
+		t.Fatalf("string summary: expected [sum1], got %v", got)
+	}
+	// summary as array of {text}
+	events = runStream(t, streamReq,
+		`{"id":"c1","model":"m","choices":[{"index":0,"delta":{"role":"assistant","reasoning_details":[{"type":"reasoning.summary","summary":[{"text":"s1"},{"text":"s2"}]}]}}]}`,
+		`{"id":"c1","model":"m","choices":[{"index":0,"delta":{"content":"done"},"finish_reason":"stop"}]}`,
+	)
+	if got := thinkingDeltaTexts(events); strings.Join(got, "") != "s1s2" {
+		t.Fatalf("array summary: expected [s1 s2], got %v", got)
+	}
+}
+
+func TestStreamingReasoning_ReasoningDetailsEncryptedSkipped(t *testing.T) {
+	events := runStream(t, streamReq,
+		`{"id":"c1","model":"m","choices":[{"index":0,"delta":{"role":"assistant","reasoning_details":[{"type":"reasoning.encrypted","data":"abc"}]}}]}`,
+		`{"id":"c1","model":"m","choices":[{"index":0,"delta":{"content":"done"},"finish_reason":"stop"}]}`,
+	)
+	if got := thinkingDeltaTexts(events); len(got) != 0 {
+		t.Fatalf("expected no thinking deltas, got %v", got)
+	}
+}
+
+func TestStreamingReasoning_FlatAliases(t *testing.T) {
+	events := runStream(t, streamReq,
+		`{"id":"c1","model":"m","choices":[{"index":0,"delta":{"role":"assistant","reasoning":"viaReasoning"}}]}`,
+		`{"id":"c1","model":"m","choices":[{"index":0,"delta":{"thinking":"viaThinking"}}]}`,
+		`{"id":"c1","model":"m","choices":[{"index":0,"delta":{"content":"done"},"finish_reason":"stop"}]}`,
+	)
+	if got := thinkingDeltaTexts(events); strings.Join(got, "") != "viaReasoningviaThinking" {
+		t.Fatalf("expected aliases collected, got %v", got)
+	}
+}
+
+func nonStreamThinkingTexts(out []byte) []string {
+	var got []string
+	gjson.GetBytes(out, "content").ForEach(func(_, block gjson.Result) bool {
+		if block.Get("type").String() == "thinking" {
+			got = append(got, block.Get("thinking").String())
+		}
+		return true
+	})
+	return got
+}
+
+func TestNonStreamReasoning_ReasoningDetails(t *testing.T) {
+	raw := `{"id":"c1","model":"m","choices":[{"index":0,"message":{"role":"assistant","content":"done","reasoning_details":[{"type":"reasoning.text","text":"deep thought"}]},"finish_reason":"stop"}],"usage":{"prompt_tokens":1,"completion_tokens":2}}`
+	out := ConvertOpenAIResponseToClaudeNonStream(context.Background(), "", []byte(`{"stream":false}`), nil, []byte(raw), nil)
+	got := nonStreamThinkingTexts(out)
+	if len(got) != 1 || got[0] != "deep thought" {
+		t.Fatalf("expected thinking [deep thought], got %v. Out: %s", got, string(out))
+	}
+}
+
+func TestNonStreamReasoning_FlatAlias(t *testing.T) {
+	raw := `{"id":"c1","model":"m","choices":[{"index":0,"message":{"role":"assistant","content":"done","reasoning":"flat thought"},"finish_reason":"stop"}],"usage":{"prompt_tokens":1,"completion_tokens":2}}`
+	out := ConvertOpenAIResponseToClaudeNonStream(context.Background(), "", []byte(`{"stream":false}`), nil, []byte(raw), nil)
+	got := nonStreamThinkingTexts(out)
+	if len(got) != 1 || got[0] != "flat thought" {
+		t.Fatalf("expected thinking [flat thought], got %v. Out: %s", got, string(out))
+	}
+}
+
+func inputJSONDeltaPayloads(events []sseEvent) []string {
+	var out []string
+	for _, e := range events {
+		if e.Type != "content_block_delta" {
+			continue
+		}
+		if gjson.Get(e.Payload, "delta.type").String() == "input_json_delta" {
+			out = append(out, gjson.Get(e.Payload, "delta.partial_json").String())
+		}
+	}
+	return out
+}
+
+func TestStreamingToolCall_ArgumentsSnapshotReplaces(t *testing.T) {
+	events := runStream(t, streamReq,
+		`{"id":"c1","model":"m","choices":[{"index":0,"delta":{"role":"assistant","tool_calls":[{"index":0,"id":"call_1","function":{"name":"get_weather","arguments":"{\"loc"}}]}}]}`,
+		`{"id":"c1","model":"m","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"arguments":{"location":"hangzhou"}}}]}}]}`,
+		`{"id":"c1","model":"m","choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}`,
+	)
+	got := inputJSONDeltaPayloads(events)
+	if len(got) != 1 || got[0] != `{"location":"hangzhou"}` {
+		t.Fatalf("expected snapshot to replace partial string, got %v", got)
+	}
+}
+
+func TestStreamingToolCall_RepeatedSnapshotsLastWins(t *testing.T) {
+	events := runStream(t, streamReq,
+		`{"id":"c1","model":"m","choices":[{"index":0,"delta":{"role":"assistant","tool_calls":[{"index":0,"id":"call_1","function":{"name":"get_weather","arguments":{"location":"a"}}}]}}]}`,
+		`{"id":"c1","model":"m","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"arguments":{"location":"b"}}}]}}]}`,
+		`{"id":"c1","model":"m","choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}`,
+	)
+	got := inputJSONDeltaPayloads(events)
+	if len(got) != 1 || got[0] != `{"location":"b"}` {
+		t.Fatalf("expected last snapshot to win, got %v", got)
+	}
+}
+
+func messageDeltaUsage(events []sseEvent) (input, output int64, found bool) {
+	for i := len(events) - 1; i >= 0; i-- {
+		if events[i].Type == "message_delta" {
+			return gjson.Get(events[i].Payload, "usage.input_tokens").Int(),
+				gjson.Get(events[i].Payload, "usage.output_tokens").Int(), true
+		}
+	}
+	return 0, 0, false
+}
+
+func TestStreamingUsage_BeforeFinish_Preserved(t *testing.T) {
+	events := runStream(t, streamReq,
+		`{"id":"c1","model":"m","choices":[{"index":0,"delta":{"role":"assistant","content":"hi"}}]}`,
+		`{"id":"c1","model":"m","choices":[],"usage":{"prompt_tokens":42,"completion_tokens":7,"total_tokens":49}}`,
+		`{"id":"c1","model":"m","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}`,
+	)
+	input, output, found := messageDeltaUsage(events)
+	if !found {
+		t.Fatal("expected a message_delta event")
+	}
+	if input != 42 || output != 7 {
+		t.Fatalf("expected usage 42/7, got %d/%d", input, output)
+	}
+}
+
+func TestStreamingUsage_AfterFinish_EmittedOnce(t *testing.T) {
+	events := runStream(t, streamReq,
+		`{"id":"c1","model":"m","choices":[{"index":0,"delta":{"role":"assistant","content":"hi"}}]}`,
+		`{"id":"c1","model":"m","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}`,
+		`{"id":"c1","model":"m","choices":[],"usage":{"prompt_tokens":42,"completion_tokens":7,"total_tokens":49}}`,
+	)
+	if n := countByType(events, "message_delta"); n != 1 {
+		t.Fatalf("expected 1 message_delta, got %d", n)
+	}
+	input, output, _ := messageDeltaUsage(events)
+	if input != 42 || output != 7 {
+		t.Fatalf("expected usage 42/7, got %d/%d", input, output)
+	}
+}

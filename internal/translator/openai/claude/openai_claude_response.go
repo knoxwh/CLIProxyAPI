@@ -55,6 +55,16 @@ type ConvertOpenAIResponseToAnthropicParams struct {
 	TextContentBlockIndex int
 	// Index assigned to thinking content block
 	ThinkingContentBlockIndex int
+	// ThinkingParts accumulates emitted thinking deltas for snapshot dedup.
+	ThinkingParts []string
+	// Usage* cache usage from any chunk (ai-gateway
+	// updateAnthropicRelayUsage semantics: store on arrival, emit at
+	// finalize). Values are post-extractOpenAIUsage (cached subtraction
+	// already applied); emitters must not re-extract from a stale root.
+	UsageSeen         bool
+	UsageInputTokens  int64
+	UsageOutputTokens int64
+	UsageCachedTokens int64
 	// Next available content block index
 	NextContentBlockIndex int
 }
@@ -140,6 +150,13 @@ func convertOpenAIStreamingChunkToAnthropic(rawJSON []byte, param *ConvertOpenAI
 	root := gjson.ParseBytes(rawJSON)
 	var results [][]byte
 
+	// Cache usage from any chunk unconditionally: some upstreams send the
+	// usage chunk before or without finish_reason.
+	if usage := root.Get("usage"); usage.Exists() && usage.Type != gjson.Null {
+		param.UsageInputTokens, param.UsageOutputTokens, param.UsageCachedTokens = extractOpenAIUsage(usage)
+		param.UsageSeen = true
+	}
+
 	// Initialize parameters if needed
 	if param.MessageID == "" {
 		param.MessageID = root.Get("id").String()
@@ -165,10 +182,10 @@ func convertOpenAIStreamingChunkToAnthropic(rawJSON []byte, param *ConvertOpenAI
 			// Don't send content_block_start for text here - wait for actual content
 		}
 
-		// Handle reasoning content delta
-		if reasoning := delta.Get("reasoning_content"); reasoning.Exists() {
-			for _, reasoningText := range collectOpenAIReasoningTexts(reasoning) {
-				if reasoningText == "" {
+		// Handle reasoning content delta (all vendor spellings)
+		if reasoningTexts := collectOpenAIReasoningTexts(delta); len(reasoningTexts) > 0 {
+			for _, reasoningText := range reasoningTexts {
+				if !appendReasoningTextIfDistinct(param, reasoningText) {
 					continue
 				}
 				stopTextContentBlock(param, &results)
@@ -257,9 +274,18 @@ func convertOpenAIStreamingChunkToAnthropic(rawJSON []byte, param *ConvertOpenAI
 
 					// Handle function arguments
 					if args := function.Get("arguments"); args.Exists() {
-						argsText := args.String()
-						if argsText != "" {
-							accumulator.Arguments.WriteString(argsText)
+						switch {
+						case args.IsObject() || args.IsArray():
+							// Snapshot form (some upstreams send a full object
+							// instead of string deltas): replace accumulated
+							// arguments. Repeated snapshots each fully replace.
+							// Mirrors ai-gateway readOpenAIChatToolArgumentsPatch.
+							accumulator.Arguments.Reset()
+							accumulator.Arguments.WriteString(args.Raw)
+						default:
+							if argsText := args.String(); argsText != "" {
+								accumulator.Arguments.WriteString(argsText)
+							}
 						}
 					}
 				}
@@ -334,26 +360,21 @@ func convertOpenAIStreamingChunkToAnthropic(rawJSON []byte, param *ConvertOpenAI
 		// Don't send message_delta here - wait for usage info or [DONE]
 	}
 
-	// Handle usage information separately (this comes in a later chunk)
-	// Only process if usage has actual values (not null)
-	if param.FinishReason != "" && !param.MessageDeltaSent {
-		usage := root.Get("usage")
-		var inputTokens, outputTokens, cachedTokens int64
-		if usage.Exists() && usage.Type != gjson.Null {
-			inputTokens, outputTokens, cachedTokens = extractOpenAIUsage(usage)
-			// Send message_delta with usage
-			messageDeltaJSON := []byte(`{"type":"message_delta","delta":{"stop_reason":"","stop_sequence":null},"usage":{"input_tokens":0,"output_tokens":0}}`)
-			messageDeltaJSON, _ = sjson.SetBytes(messageDeltaJSON, "delta.stop_reason", mapOpenAIFinishReasonToAnthropic(effectiveOpenAIFinishReason(param)))
-			messageDeltaJSON, _ = sjson.SetBytes(messageDeltaJSON, "usage.input_tokens", inputTokens)
-			messageDeltaJSON, _ = sjson.SetBytes(messageDeltaJSON, "usage.output_tokens", outputTokens)
-			if cachedTokens > 0 {
-				messageDeltaJSON, _ = sjson.SetBytes(messageDeltaJSON, "usage.cache_read_input_tokens", cachedTokens)
-			}
-			results = append(results, translatorcommon.AppendSSEEventBytes(nil, "message_delta", messageDeltaJSON, 2))
-			param.MessageDeltaSent = true
-
-			emitMessageStopIfNeeded(param, &results)
+	// Emit message_delta once finish_reason is known and usage is available,
+	// either in this chunk or cached from an earlier/later one.
+	usageInThisChunk := root.Get("usage").Exists() && root.Get("usage").Type != gjson.Null
+	if param.FinishReason != "" && !param.MessageDeltaSent && (usageInThisChunk || param.UsageSeen) {
+		messageDeltaJSON := []byte(`{"type":"message_delta","delta":{"stop_reason":"","stop_sequence":null},"usage":{"input_tokens":0,"output_tokens":0}}`)
+		messageDeltaJSON, _ = sjson.SetBytes(messageDeltaJSON, "delta.stop_reason", mapOpenAIFinishReasonToAnthropic(effectiveOpenAIFinishReason(param)))
+		messageDeltaJSON, _ = sjson.SetBytes(messageDeltaJSON, "usage.input_tokens", param.UsageInputTokens)
+		messageDeltaJSON, _ = sjson.SetBytes(messageDeltaJSON, "usage.output_tokens", param.UsageOutputTokens)
+		if param.UsageCachedTokens > 0 {
+			messageDeltaJSON, _ = sjson.SetBytes(messageDeltaJSON, "usage.cache_read_input_tokens", param.UsageCachedTokens)
 		}
+		results = append(results, translatorcommon.AppendSSEEventBytes(nil, "message_delta", messageDeltaJSON, 2))
+		param.MessageDeltaSent = true
+
+		emitMessageStopIfNeeded(param, &results)
 	}
 
 	return results
@@ -406,6 +427,13 @@ func convertOpenAIDoneToAnthropic(param *ConvertOpenAIResponseToAnthropicParams)
 	if param.FinishReason != "" && !param.MessageDeltaSent {
 		messageDeltaJSON := []byte(`{"type":"message_delta","delta":{"stop_reason":"","stop_sequence":null},"usage":{"input_tokens":0,"output_tokens":0}}`)
 		messageDeltaJSON, _ = sjson.SetBytes(messageDeltaJSON, "delta.stop_reason", mapOpenAIFinishReasonToAnthropic(effectiveOpenAIFinishReason(param)))
+		if param.UsageSeen {
+			messageDeltaJSON, _ = sjson.SetBytes(messageDeltaJSON, "usage.input_tokens", param.UsageInputTokens)
+			messageDeltaJSON, _ = sjson.SetBytes(messageDeltaJSON, "usage.output_tokens", param.UsageOutputTokens)
+			if param.UsageCachedTokens > 0 {
+				messageDeltaJSON, _ = sjson.SetBytes(messageDeltaJSON, "usage.cache_read_input_tokens", param.UsageCachedTokens)
+			}
+		}
 		results = append(results, translatorcommon.AppendSSEEventBytes(nil, "message_delta", messageDeltaJSON, 2))
 		param.MessageDeltaSent = true
 	}
@@ -427,8 +455,7 @@ func convertOpenAINonStreamingToAnthropic(rawJSON []byte) [][]byte {
 	if choices := root.Get("choices"); choices.Exists() && choices.IsArray() && len(choices.Array()) > 0 {
 		choice := choices.Array()[0] // Take first choice
 
-		reasoningNode := choice.Get("message.reasoning_content")
-		for _, reasoningText := range collectOpenAIReasoningTexts(reasoningNode) {
+		for _, reasoningText := range collectOpenAIReasoningTexts(choice.Get("message")) {
 			if reasoningText == "" {
 				continue
 			}
@@ -515,7 +542,57 @@ func (p *ConvertOpenAIResponseToAnthropicParams) toolContentBlockIndex(openAIToo
 	return idx
 }
 
-func collectOpenAIReasoningTexts(node gjson.Result) []string {
+// appendReasoningTextIfDistinct reports whether value should be emitted,
+// appending it to param.ThinkingParts when distinct. Mirrors ai-gateway
+// appendReasoningDeltaIfDistinct semantics: a chunk whose trimmed text
+// equals the trimmed accumulated text or any previously emitted part is dropped.
+// Whitespace-only chunks are also dropped (ai-gateway would emit them).
+func appendReasoningTextIfDistinct(param *ConvertOpenAIResponseToAnthropicParams, value string) bool {
+	text := strings.TrimSpace(value)
+	if text == "" {
+		return false
+	}
+	existing := strings.TrimSpace(strings.Join(param.ThinkingParts, ""))
+	if existing == text {
+		return false
+	}
+	for _, part := range param.ThinkingParts {
+		if strings.TrimSpace(part) == text {
+			return false
+		}
+	}
+	param.ThinkingParts = append(param.ThinkingParts, value)
+	return true
+}
+
+// collectOpenAIReasoningTexts extracts thinking texts from an OpenAI
+// delta/message object across vendor spellings: reasoning_content
+// (string/array/object), reasoning_details[] (text/reasoning/thinking/
+// summary fields; encrypted items skipped), and flat reasoning/thinking
+// string aliases. Mirrors ai-gateway collectOpenAIChatReasoningDeltas.
+func collectOpenAIReasoningTexts(container gjson.Result) []string {
+	var texts []string
+	texts = append(texts, reasoningTextsFromValue(container.Get("reasoning_content"))...)
+	container.Get("reasoning_details").ForEach(func(_, item gjson.Result) bool {
+		if item.Get("encrypted_content").Exists() || item.Get("data").Exists() {
+			return true // skip encrypted-only items
+		}
+		for _, field := range []string{"text", "reasoning", "thinking", "summary"} {
+			if v := item.Get(field); v.Exists() {
+				texts = append(texts, reasoningTextsFromValue(v)...)
+				break
+			}
+		}
+		return true
+	})
+	texts = append(texts, reasoningTextsFromValue(container.Get("reasoning"))...)
+	texts = append(texts, reasoningTextsFromValue(container.Get("thinking"))...)
+	return texts
+}
+
+// reasoningTextsFromValue flattens a reasoning value in string, array, or
+// object-with-text form into plain texts.
+func reasoningTextsFromValue(node gjson.Result) []string {
 	var texts []string
 	if !node.Exists() {
 		return texts
@@ -523,7 +600,7 @@ func collectOpenAIReasoningTexts(node gjson.Result) []string {
 
 	if node.IsArray() {
 		node.ForEach(func(_, value gjson.Result) bool {
-			texts = append(texts, collectOpenAIReasoningTexts(value)...)
+			texts = append(texts, reasoningTextsFromValue(value)...)
 			return true
 		})
 		return texts
@@ -711,15 +788,13 @@ func ConvertOpenAIResponseToClaudeNonStream(_ context.Context, _ string, origina
 				}
 			}
 
-			if reasoning := message.Get("reasoning_content"); reasoning.Exists() {
-				for _, reasoningText := range collectOpenAIReasoningTexts(reasoning) {
-					if reasoningText == "" {
-						continue
-					}
-					block := []byte(`{"type":"thinking","thinking":""}`)
-					block, _ = sjson.SetBytes(block, "thinking", reasoningText)
-					out, _ = sjson.SetRawBytes(out, "content.-1", block)
+			for _, reasoningText := range collectOpenAIReasoningTexts(message) {
+				if reasoningText == "" {
+					continue
 				}
+				block := []byte(`{"type":"thinking","thinking":""}`)
+				block, _ = sjson.SetBytes(block, "thinking", reasoningText)
+				out, _ = sjson.SetRawBytes(out, "content.-1", block)
 			}
 
 			if toolCalls := message.Get("tool_calls"); toolCalls.Exists() && toolCalls.IsArray() {

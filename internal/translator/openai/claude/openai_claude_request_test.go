@@ -20,7 +20,12 @@ func TestConvertClaudeRequestToOpenAI_ThinkingToReasoningContent(t *testing.T) {
 		wantHasContent          bool
 	}{
 		{
-			name: "AC1: unsigned assistant thinking is dropped",
+			// Policy revised 2026-07: unsigned thinking is replayed (aee7a5fb's
+			// default-drop predated CPA emitting signature-less thinking itself;
+			// CPA's response converter provably never signs, so same-link history
+			// is always unsigned). Signed blocks still require GPT-compatible
+			// signatures. Do not "fix" this back.
+			name: "AC1: unsigned assistant thinking is replayed",
 			inputJSON: `{
 				"model": "claude-3-opus",
 				"messages": [{
@@ -31,8 +36,8 @@ func TestConvertClaudeRequestToOpenAI_ThinkingToReasoningContent(t *testing.T) {
 					]
 				}]
 			}`,
-			wantReasoningContent:    "",
-			wantHasReasoningContent: false,
+			wantReasoningContent:    "Let me analyze this step by step...",
+			wantHasReasoningContent: true,
 			wantContentText:         "Here is my response.",
 			wantHasContent:          true,
 		},
@@ -54,7 +59,9 @@ func TestConvertClaudeRequestToOpenAI_ThinkingToReasoningContent(t *testing.T) {
 			wantHasContent:          true,
 		},
 		{
-			name: "AC3: unsigned thinking-only message is dropped",
+			// Policy revised 2026-07 (see AC1): thinking-only assistant messages
+			// are kept with empty content + reasoning_content.
+			name: "AC3: unsigned thinking-only message is replayed",
 			inputJSON: `{
 				"model": "claude-3-opus",
 				"messages": [{
@@ -64,8 +71,8 @@ func TestConvertClaudeRequestToOpenAI_ThinkingToReasoningContent(t *testing.T) {
 					]
 				}]
 			}`,
-			wantReasoningContent:    "",
-			wantHasReasoningContent: false,
+			wantReasoningContent:    "Internal reasoning only.",
+			wantHasReasoningContent: true,
 			wantContentText:         "",
 			wantHasContent:          false,
 		},
@@ -140,7 +147,9 @@ func TestConvertClaudeRequestToOpenAI_ThinkingToReasoningContent(t *testing.T) {
 			wantHasContent:          true,
 		},
 		{
-			name: "Unsigned thinking parts are dropped",
+			// Policy revised 2026-07 (see AC1): unsigned parts are replayed,
+			// joined with "\n\n".
+			name: "Unsigned thinking parts are replayed",
 			inputJSON: `{
 				"model": "claude-3-opus",
 				"messages": [{
@@ -152,12 +161,14 @@ func TestConvertClaudeRequestToOpenAI_ThinkingToReasoningContent(t *testing.T) {
 					]
 				}]
 			}`,
-			wantReasoningContent:    "",
-			wantHasReasoningContent: false,
+			wantReasoningContent:    "First thought.\n\nSecond thought.",
+			wantHasReasoningContent: true,
 			wantContentText:         "Final answer.",
 			wantHasContent:          true,
 		},
 		{
+			// Policy revised 2026-07 (see AC1): unsigned thinking replays;
+			// redacted_thinking still ignored.
 			name: "Mixed unsigned thinking and redacted_thinking",
 			inputJSON: `{
 				"model": "claude-3-opus",
@@ -170,8 +181,8 @@ func TestConvertClaudeRequestToOpenAI_ThinkingToReasoningContent(t *testing.T) {
 					]
 				}]
 			}`,
-			wantReasoningContent:    "",
-			wantHasReasoningContent: false,
+			wantReasoningContent:    "Visible thought.",
+			wantHasReasoningContent: true,
 			wantContentText:         "Answer.",
 			wantHasContent:          true,
 		},
@@ -311,9 +322,11 @@ func TestConvertClaudeRequestToOpenAI_SignedThinkingCompatibility(t *testing.T) 
 	}
 }
 
-// TestConvertClaudeRequestToOpenAI_UnsignedThinkingOnlyMessageDropped verifies
-// that unsigned Claude thinking is not migrated into GPT reasoning state.
-func TestConvertClaudeRequestToOpenAI_UnsignedThinkingOnlyMessageDropped(t *testing.T) {
+// TestConvertClaudeRequestToOpenAI_UnsignedThinkingOnlyMessageReplayed verifies
+// that unsigned Claude thinking is migrated into GPT reasoning state.
+// Policy revised 2026-07 (see AC1): unsigned thinking replays; the
+// thinking-only assistant message is kept with empty content.
+func TestConvertClaudeRequestToOpenAI_UnsignedThinkingOnlyMessageReplayed(t *testing.T) {
 	inputJSON := `{
 		"model": "claude-3-opus",
 		"messages": [
@@ -337,13 +350,12 @@ func TestConvertClaudeRequestToOpenAI_UnsignedThinkingOnlyMessageDropped(t *test
 
 	messages := resultJSON.Get("messages").Array()
 
-	if len(messages) != 2 {
-		t.Fatalf("Expected unsigned thinking-only assistant message to be dropped, got %d. Messages: %v", len(messages), resultJSON.Get("messages").Raw)
+	if len(messages) != 3 {
+		t.Fatalf("Expected thinking-only assistant message to be kept, got %d messages. Messages: %v", len(messages), resultJSON.Get("messages").Raw)
 	}
-	for _, message := range messages {
-		if message.Get("reasoning_content").Exists() {
-			t.Fatalf("unsigned thinking should not produce reasoning_content. Messages: %v", resultJSON.Get("messages").Raw)
-		}
+	assistantMsg := messages[1]
+	if got := assistantMsg.Get("reasoning_content").String(); got != "Let me calculate: 2+2=4" {
+		t.Fatalf("reasoning_content = %q, want %q. Messages: %v", got, "Let me calculate: 2+2=4", resultJSON.Get("messages").Raw)
 	}
 }
 
@@ -817,7 +829,8 @@ func TestConvertClaudeRequestToOpenAI_AssistantThinkingToolUseThinkingSplit(t *t
 	resultJSON := gjson.ParseBytes(result)
 	messages := resultJSON.Get("messages").Array()
 
-	// Unsigned thinking is dropped, while text and tool_calls remain unified.
+	// Unsigned thinking is replayed (policy revised 2026-07, see AC1);
+	// text and tool_calls remain unified.
 	if len(messages) != 1 {
 		t.Fatalf("Expected 1 message, got %d. Messages: %s", len(messages), resultJSON.Get("messages").Raw)
 	}
@@ -840,8 +853,9 @@ func TestConvertClaudeRequestToOpenAI_AssistantThinkingToolUseThinkingSplit(t *t
 		t.Fatalf("Expected assistant message to have tool_calls")
 	}
 
-	if assistantMsg.Get("reasoning_content").Exists() {
-		t.Fatalf("unsigned thinking should not produce reasoning_content: %s", assistantMsg.Raw)
+	// Unsigned thinking replays as reasoning_content (policy revised 2026-07).
+	if got := assistantMsg.Get("reasoning_content").String(); got != "t1\n\nt2" {
+		t.Fatalf("reasoning_content = %q, want %q: %s", got, "t1\n\nt2", assistantMsg.Raw)
 	}
 }
 
