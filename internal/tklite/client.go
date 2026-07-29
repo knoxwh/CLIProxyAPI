@@ -58,15 +58,10 @@ func Optimize(ctx context.Context, cfg *config.Config, endpoint string, body []b
 	client := getClient(cfg.TKLite.Socket)
 	fwd := extractHeaders(headers)
 
-	requestTimeout := time.Duration(cfg.TKLite.RequestTimeoutSeconds) * time.Second
-	optimizeCtx := ctx
-	cancel := func() {}
-	if requestTimeout > 0 {
-		optimizeCtx, cancel = context.WithTimeout(ctx, requestTimeout)
-	}
-	defer cancel()
-
-	optimized, err := client.Optimize(optimizeCtx, endpoint, body, fwd, cfg.TKLite.MaxResponseBytes)
+	// No timeout is set on the sidecar call: per project rules, once the
+	// unix-socket connection is established (2s DialTimeout in NewClient)
+	// no further timeouts apply. The caller's ctx still governs cancellation.
+	optimized, err := client.Optimize(ctx, endpoint, body, fwd, cfg.TKLite.MaxResponseBytes)
 	if err != nil {
 		log.WithError(err).WithField("endpoint", endpoint).
 			Warn("tklite optimization failed, using original body")

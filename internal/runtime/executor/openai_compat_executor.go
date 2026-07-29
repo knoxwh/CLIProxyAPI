@@ -116,11 +116,18 @@ func (e *OpenAICompatExecutor) Execute(ctx context.Context, auth *cliproxyauth.A
 	// PreTransform: when the source is Claude (CC) form, clean the
 	// history-normalization subset before translation so the translator
 	// sees a clean, cross-turn-stable Anthropic body. tklite.Optimize is
-	// fail-open. See docs §6.2.
+	// fail-open.
 	if from == sdktranslator.FormatClaude {
 		hdrs := CacheOptTKLiteHeaders(auth, req, opts.Headers)
 		originalPayload = tklite.Optimize(ctx, e.cfg, "/v1/pretransform/messages", originalPayload, hdrs)
-		payload = tklite.Optimize(ctx, e.cfg, "/v1/pretransform/messages", payload, hdrs)
+		// When the request body is the original payload (no separate
+		// opts.OriginalRequest), the two are identical: reuse the cleaned
+		// result instead of a second, redundant sidecar round-trip.
+		if bytes.Equal(originalPayloadSource, req.Payload) {
+			payload = originalPayload
+		} else {
+			payload = tklite.Optimize(ctx, e.cfg, "/v1/pretransform/messages", payload, hdrs)
+		}
 	}
 	originalTranslated := helps.TranslateRequestWithCodexMultiAgentV2(ctx, opts.Headers, e.cfg, from, to, baseModel, originalPayload, opts.Stream)
 	translated := helps.TranslateRequestWithCodexMultiAgentV2(ctx, opts.Headers, e.cfg, from, to, baseModel, payload, opts.Stream)
@@ -348,11 +355,15 @@ func (e *OpenAICompatExecutor) ExecuteStream(ctx context.Context, auth *cliproxy
 	originalPayload := originalPayloadSource
 	payload := req.Payload
 	// PreTransform: clean CC history-normalization subset before
-	// translation. See docs §6.2.
+	// translation.
 	if from == sdktranslator.FormatClaude {
 		hdrs := CacheOptTKLiteHeaders(auth, req, opts.Headers)
 		originalPayload = tklite.Optimize(ctx, e.cfg, "/v1/pretransform/messages", originalPayload, hdrs)
-		payload = tklite.Optimize(ctx, e.cfg, "/v1/pretransform/messages", payload, hdrs)
+		if bytes.Equal(originalPayloadSource, req.Payload) {
+			payload = originalPayload
+		} else {
+			payload = tklite.Optimize(ctx, e.cfg, "/v1/pretransform/messages", payload, hdrs)
+		}
 	}
 	originalTranslated := helps.TranslateRequestWithCodexMultiAgentV2(ctx, opts.Headers, e.cfg, from, to, baseModel, originalPayload, true)
 	translated := helps.TranslateRequestWithCodexMultiAgentV2(ctx, opts.Headers, e.cfg, from, to, baseModel, payload, true)
@@ -642,7 +653,7 @@ func (e *OpenAICompatExecutor) CountTokens(ctx context.Context, auth *cliproxyau
 	to := sdktranslator.FromString("openai")
 	// PreTransform: clean CC history-normalization subset before translation
 	// so the token count reflects the body actually sent upstream (which
-	// would be cleaned on the real request path). See docs §6.2.
+	// would be cleaned on the real request path).
 	payload := req.Payload
 	if from == sdktranslator.FormatClaude {
 		payload = tklite.Optimize(ctx, e.cfg, "/v1/pretransform/messages", payload, CacheOptTKLiteHeaders(auth, req, opts.Headers))
