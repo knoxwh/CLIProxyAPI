@@ -10,6 +10,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/runtime/executor/helps"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/thinking"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/tklite"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v7/sdk/translator"
@@ -72,6 +73,10 @@ func (e *CodexExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, re
 		return resp, errReplay
 	}
 	reporter.SetTranslatedReasoningEffort(body, to.String())
+
+	// tklite cache optimization
+	body = tklite.Optimize(ctx, e.cfg, "/v1/responses", body, CacheOptTKLiteHeaders(auth, req, opts.Headers))
+	body = CacheOptPostTKLite(body)
 
 	url := strings.TrimSuffix(baseURL, "/") + "/responses"
 	var identityState codexIdentityConfuseState
@@ -229,6 +234,10 @@ func (e *CodexExecutor) executeCompact(ctx context.Context, auth *cliproxyauth.A
 	body = normalizeCodexParallelToolCalls(body, opts.Headers)
 	body, optimizeMultiAgentV2 := helps.OptimizeCodexMultiAgentV2Request(ctx, opts.Headers, body, e.cfg)
 	reporter.SetTranslatedReasoningEffort(body, to.String())
+
+	// tklite cache optimization
+	body = tklite.Optimize(ctx, e.cfg, "/v1/responses", body, CacheOptTKLiteHeaders(auth, req, opts.Headers))
+	body = CacheOptPostTKLite(body)
 
 	url := strings.TrimSuffix(baseURL, "/") + "/responses/compact"
 	var identityState codexIdentityConfuseState

@@ -1,0 +1,190 @@
+// Package tklite provides a client for the tklite cache optimization service.
+//
+// tklite runs as a separate process listening on a Unix domain socket.
+// This client sends request bodies to tklite for cache optimization
+// (auto cache_control, prompt_cache_key, tool normalization) and
+// returns the optimized body for upstream delivery.
+package tklite
+
+import (
+	"bytes"
+	"context"
+	"fmt"
+	"io"
+	"net"
+	"net/http"
+	"sync"
+	"time"
+
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
+	log "github.com/sirupsen/logrus"
+)
+
+// ── Singleton client ──────────────────────────────────────────────────────
+// Path-aware client cache: if the socket path changes (e.g. config
+// hot-reload), a new client is created for the new path.
+
+var (
+	defaultClient       *Client
+	defaultClientSocket string
+	defaultClientMu     sync.Mutex
+)
+
+func getClient(socketPath string) *Client {
+	defaultClientMu.Lock()
+	defer defaultClientMu.Unlock()
+	if defaultClient == nil || defaultClientSocket != socketPath {
+		defaultClient = NewClient(socketPath)
+		defaultClientSocket = socketPath
+	}
+	return defaultClient
+}
+
+// ── Public API ─────────────────────────────────────────────────────────────
+
+// Optimize sends the request body to tklite for cache optimization if enabled.
+// Returns the original body if disabled, misconfigured, or on any error.
+// This is the single entry point for all executor integrations.
+func Optimize(ctx context.Context, cfg *config.Config, endpoint string, body []byte, headers http.Header) []byte {
+	if cfg == nil || !cfg.TKLite.Enabled || cfg.TKLite.Socket == "" {
+		return body
+	}
+
+	client := getClient(cfg.TKLite.Socket)
+	fwd := extractHeaders(headers)
+
+	requestTimeout := time.Duration(cfg.TKLite.RequestTimeoutSeconds) * time.Second
+	optimizeCtx := ctx
+	cancel := func() {}
+	if requestTimeout > 0 {
+		optimizeCtx, cancel = context.WithTimeout(ctx, requestTimeout)
+	}
+	defer cancel()
+
+	optimized, err := client.Optimize(optimizeCtx, endpoint, body, fwd, cfg.TKLite.MaxResponseBytes)
+	if err != nil {
+		log.WithError(err).WithField("endpoint", endpoint).
+			Warn("tklite optimization failed, using original body")
+		return body
+	}
+	return optimized
+}
+
+// ── Header forwarding ─────────────────────────────────────────────────────
+
+// forwardHeaders lists headers relevant to tklite optimization.
+// Secrets (x-api-key, authorization) and public session identifiers
+// (x-headroom-session-id) are not forwarded to the sidecar.
+//
+// Only headers CPA actually sets are listed. The legacy x-headroom-bypass,
+// x-client, and x-request-id were never set by CPA, so tklite's reads of
+// them were dead; they have been removed from both sides.
+var forwardHeaders = []string{
+	"anthropic-beta",
+	"x-tklite-session-key",
+}
+
+func extractHeaders(h http.Header) map[string]string {
+	if h == nil {
+		return nil
+	}
+	fwd := make(map[string]string, len(forwardHeaders))
+	for _, key := range forwardHeaders {
+		if v := h.Get(key); v != "" {
+			fwd[key] = v
+		}
+	}
+	if len(fwd) == 0 {
+		return nil
+	}
+	return fwd
+}
+
+// ── Client ─────────────────────────────────────────────────────────────────
+
+// Client communicates with the tklite optimization service over a Unix socket.
+type Client struct {
+	httpClient *http.Client
+	socketPath string
+}
+
+// NewClient creates a tklite client connected to the given Unix socket path.
+// No Client.Timeout is set — per project rules, timeouts are only allowed
+// during connection acquisition (the 2s DialTimeout); once the upstream
+// connection is established, no further timeouts are applied.
+func NewClient(socketPath string) *Client {
+	transport := &http.Transport{
+		DialContext: func(_ context.Context, _, _ string) (net.Conn, error) {
+			return net.DialTimeout("unix", socketPath, 2*time.Second)
+		},
+		MaxIdleConns:        4,
+		MaxIdleConnsPerHost: 4,
+		IdleConnTimeout:     90 * time.Second,
+	}
+	return &Client{
+		httpClient: &http.Client{
+			Transport: transport,
+		},
+		socketPath: socketPath,
+	}
+}
+
+// Optimize sends a request body to tklite for cache optimization.
+// Returns the optimized body on success. On error, returns (nil, err)
+// so the caller can decide the fallback strategy (typically: use original body).
+func (c *Client) Optimize(ctx context.Context, endpoint string, body []byte, headers map[string]string, maxResponseBytes int64) ([]byte, error) {
+	url := "http://localhost" + endpoint
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
+	if err != nil {
+		return nil, fmt.Errorf("tklite: build request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	for k, v := range headers {
+		req.Header.Set(k, v)
+	}
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("tklite: request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		io.Copy(io.Discard, resp.Body)
+		return nil, fmt.Errorf("tklite: unexpected status %d", resp.StatusCode)
+	}
+
+	if maxResponseBytes <= 0 {
+		maxResponseBytes = config.DefaultTKLiteMaxResponseBytes
+	}
+	limited := io.LimitReader(resp.Body, maxResponseBytes+1)
+	optimized, err := io.ReadAll(limited)
+	if err != nil {
+		return nil, fmt.Errorf("tklite: read response: %w", err)
+	}
+	if int64(len(optimized)) > maxResponseBytes {
+		return nil, fmt.Errorf("tklite: response too large: %d > %d", len(optimized), maxResponseBytes)
+	}
+
+	return optimized, nil
+}
+
+// Health checks if the tklite service is reachable.
+func (c *Client) Health(ctx context.Context) error {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, "http://localhost/v1/health", nil)
+	if err != nil {
+		return fmt.Errorf("tklite: build health request: %w", err)
+	}
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return fmt.Errorf("tklite: health check failed: %w", err)
+	}
+	defer resp.Body.Close()
+	io.Copy(io.Discard, resp.Body)
+
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("tklite: health returned status %d", resp.StatusCode)
+	}
+	return nil
+}

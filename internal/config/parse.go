@@ -42,6 +42,7 @@ func ParseConfigBytes(data []byte) (*Config, error) {
 		return nil, fmt.Errorf("parse config payload: %w", err)
 	}
 
+	cfg.TKLite.Normalize()
 	cfg.CredentialConcurrency = cfg.CredentialConcurrency.WithDefaults()
 	if errValidate := cfg.CredentialInFlight.Validate(); errValidate != nil {
 		return nil, errValidate

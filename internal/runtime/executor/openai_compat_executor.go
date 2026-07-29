@@ -17,6 +17,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/runtime/executor/helps"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/thinking"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/tklite"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
@@ -129,6 +130,22 @@ func (e *OpenAICompatExecutor) Execute(ctx context.Context, auth *cliproxyauth.A
 		translated = sanitizeOpenAIResponsesReasoningEncryptedContent(ctx, "openai compat executor", translated)
 	}
 	reporter.SetTranslatedReasoningEffort(translated, to.String())
+
+	// tklite cache optimization
+	switch endpoint {
+	case "/chat/completions":
+		translated = tklite.Optimize(ctx, e.cfg, "/v1/chat/completions", translated, CacheOptTKLiteHeaders(auth, req, opts.Headers))
+	case "/responses/compact":
+		translated = tklite.Optimize(ctx, e.cfg, "/v1/responses", translated, CacheOptTKLiteHeaders(auth, req, opts.Headers))
+	}
+
+	// tklite re-injects prompt_cache_retention after trunk deletes it; the
+	// upstream Responses API rejects this field with HTTP 400
+	// ("Unsupported parameter: prompt_cache_retention"). Strip it defensively,
+	// mirroring codex_executor.go and CacheOptPostTKLite.
+	if updated, errDelete := sjson.DeleteBytes(translated, "prompt_cache_retention"); errDelete == nil {
+		translated = updated
+	}
 
 	url := strings.TrimSuffix(baseURL, "/") + endpoint
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(translated))
@@ -328,6 +345,14 @@ func (e *OpenAICompatExecutor) ExecuteStream(ctx context.Context, auth *cliproxy
 	// are captured even when the upstream is an OpenAI-compatible provider.
 	translated = helps.SetBoolIfDifferent(translated, "stream_options.include_usage", true)
 	reporter.SetTranslatedReasoningEffort(translated, to.String())
+
+	// tklite cache optimization (no endpoint filter needed: image and responses/compact paths already branched off)
+	translated = tklite.Optimize(ctx, e.cfg, "/v1/chat/completions", translated, CacheOptTKLiteHeaders(auth, req, opts.Headers))
+
+	// tklite re-injects prompt_cache_retention; upstream rejects it with HTTP 400.
+	if updated, errDelete := sjson.DeleteBytes(translated, "prompt_cache_retention"); errDelete == nil {
+		translated = updated
+	}
 
 	url := strings.TrimSuffix(baseURL, "/") + "/chat/completions"
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(translated))
