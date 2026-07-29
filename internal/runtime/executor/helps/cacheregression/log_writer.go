@@ -10,7 +10,10 @@ import (
 
 const cacheRegressionMaxLogSizeBytes int64 = 10 * 1024 * 1024
 
-var logFileMu sync.Map // path -> *sync.Mutex
+// writeMu serializes all regression log writes. Writes are low-frequency (only
+// on a detected regression), so a single mutex is enough and avoids the
+// unbounded growth of a per-path mutex map (a new path each day and rotation).
+var writeMu sync.Mutex
 
 func writeRegressionLog(logDir, key string, cacheRead int64, body []byte, e *entry, meta Meta) {
 	if e == nil {
@@ -20,9 +23,8 @@ func writeRegressionLog(logDir, key string, cacheRead int64, body []byte, e *ent
 	name := "cache-regression-" + now.Format("2006-01-02") + ".log"
 	path := filepath.Join(logDir, name)
 
-	mu := loadFileMu(path)
-	mu.Lock()
-	defer mu.Unlock()
+	writeMu.Lock()
+	defer writeMu.Unlock()
 
 	if err := os.MkdirAll(logDir, 0o755); err != nil {
 		fmt.Fprintf(os.Stderr, "cacheregression: mkdir %s failed: %v\n", logDir, err)
@@ -39,7 +41,7 @@ func writeRegressionLog(logDir, key string, cacheRead int64, body []byte, e *ent
 	delta := cacheRead - e.prevRead
 	fmt.Fprintf(f, "=== CACHE REGRESSION ===\n")
 	fmt.Fprintf(f, "Timestamp:      %s\n", now.Format("2006-01-02T15:04:05Z07:00"))
-	fmt.Fprintf(f, "Auth:           %s (%s)\n", meta.AuthID, meta.AuthLabel)
+	fmt.Fprintf(f, "Auth:           %s\n", meta.AuthID)
 	fmt.Fprintf(f, "Session:        %s\n", meta.SessionID)
 	fmt.Fprintf(f, "SystemHash:     %s\n", meta.SystemHash)
 	fmt.Fprintf(f, "Model:          %s\n", meta.Model)
@@ -68,9 +70,4 @@ func regressionLogPathBeforeWrite(logDir, basePath string, now time.Time) string
 		return rotatedPath
 	}
 	return basePath
-}
-
-func loadFileMu(path string) *sync.Mutex {
-	v, _ := logFileMu.LoadOrStore(path, &sync.Mutex{})
-	return v.(*sync.Mutex)
 }

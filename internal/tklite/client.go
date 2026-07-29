@@ -33,7 +33,12 @@ var (
 func getClient(socketPath string) *Client {
 	defaultClientMu.Lock()
 	defer defaultClientMu.Unlock()
-	if defaultClient == nil || defaultClientSocket != socketPath {
+	if defaultClientSocket != socketPath {
+		// Socket path changed (config hot-reload): drop the old client's idle
+		// connections before replacing it so they do not linger.
+		if defaultClient != nil {
+			defaultClient.httpClient.CloseIdleConnections()
+		}
 		defaultClient = NewClient(socketPath)
 		defaultClientSocket = socketPath
 	}
@@ -167,24 +172,4 @@ func (c *Client) Optimize(ctx context.Context, endpoint string, body []byte, hea
 	}
 
 	return optimized, nil
-}
-
-// Health checks if the tklite service is reachable.
-func (c *Client) Health(ctx context.Context) error {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, "http://localhost/v1/health", nil)
-	if err != nil {
-		return fmt.Errorf("tklite: build health request: %w", err)
-	}
-
-	resp, err := c.httpClient.Do(req)
-	if err != nil {
-		return fmt.Errorf("tklite: health check failed: %w", err)
-	}
-	defer resp.Body.Close()
-	io.Copy(io.Discard, resp.Body)
-
-	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("tklite: health returned status %d", resp.StatusCode)
-	}
-	return nil
 }

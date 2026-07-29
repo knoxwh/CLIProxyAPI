@@ -152,10 +152,8 @@ func (e *OpenAICompatExecutor) Execute(ctx context.Context, auth *cliproxyauth.A
 	// tklite re-injects prompt_cache_retention after trunk deletes it; the
 	// upstream Responses API rejects this field with HTTP 400
 	// ("Unsupported parameter: prompt_cache_retention"). Strip it defensively,
-	// mirroring codex_executor.go and CacheOptPostTKLite.
-	if updated, errDelete := sjson.DeleteBytes(translated, "prompt_cache_retention"); errDelete == nil {
-		translated = updated
-	}
+	// mirroring CacheOptPostTKLite.
+	translated = StripPromptCacheRetention(translated)
 
 	if e.cfg != nil && e.cfg.CacheRegression.Enabled {
 		reporter.SetCacheRegressionEnabled(true)
@@ -377,9 +375,7 @@ func (e *OpenAICompatExecutor) ExecuteStream(ctx context.Context, auth *cliproxy
 	translated = tklite.Optimize(ctx, e.cfg, "/v1/chat/completions", translated, CacheOptTKLiteHeaders(auth, req, opts.Headers))
 
 	// tklite re-injects prompt_cache_retention; upstream rejects it with HTTP 400.
-	if updated, errDelete := sjson.DeleteBytes(translated, "prompt_cache_retention"); errDelete == nil {
-		translated = updated
-	}
+	translated = StripPromptCacheRetention(translated)
 
 	if e.cfg != nil && e.cfg.CacheRegression.Enabled {
 		reporter.SetCacheRegressionEnabled(true)

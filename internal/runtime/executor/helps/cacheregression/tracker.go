@@ -11,7 +11,6 @@ import (
 // Meta decorates a regression log entry with identifying context.
 type Meta struct {
 	AuthID     string
-	AuthLabel  string
 	SessionID  string
 	SystemHash string
 	Model      string
@@ -26,6 +25,11 @@ type entry struct {
 }
 
 // Tracker holds per-bucket cache_read history and the last request body.
+//
+// Buckets are keyed by auth+session+systemHash and never expire; each entry
+// retains the previous request body for diffing. The detector is opt-in
+// (CacheRegression.Enabled, default off); enabling it on a long-running
+// process with many distinct sessions grows memory unboundedly.
 type Tracker struct {
 	m      sync.Map // key -> *entry
 	logDir atomic.Pointer[string]

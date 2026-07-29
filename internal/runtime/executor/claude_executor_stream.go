@@ -17,7 +17,6 @@ import (
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v7/sdk/translator"
 	log "github.com/sirupsen/logrus"
 	"github.com/tidwall/gjson"
-	"github.com/tidwall/sjson"
 )
 
 func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (_ *cliproxyexecutor.StreamResult, err error) {
@@ -89,7 +88,7 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 
 	// tklite cache optimization (after existing cache_control logic; tklite detects existing markers and skips placement)
 	body = tklite.Optimize(ctx, e.cfg, "/v1/messages", body, CacheOptTKLiteHeaders(auth, req, opts.Headers))
-	body, _ = sjson.DeleteBytes(body, "prompt_cache_retention")
+	body = StripPromptCacheRetention(body)
 
 	// Extract betas from body and convert to header
 	var extraBetas []string

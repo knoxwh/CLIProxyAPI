@@ -62,7 +62,12 @@ func HashSystemPrompt(payload []byte) string {
 			})
 		}
 	}
-	sum := sha256.Sum256([]byte(joined.String()))
+	return shortSystemHash(joined.String())
+}
+
+// shortSystemHash returns the first 8 hex chars of SHA256 over s.
+func shortSystemHash(s string) string {
+	sum := sha256.Sum256([]byte(s))
 	return hex.EncodeToString(sum[:])[:8]
 }
 
@@ -128,6 +133,5 @@ func HashOpenAISystemPrompt(payload []byte) string {
 			})
 		}
 	}
-	sum := sha256.Sum256([]byte(joined.String()))
-	return hex.EncodeToString(sum[:])[:8]
+	return shortSystemHash(joined.String())
 }

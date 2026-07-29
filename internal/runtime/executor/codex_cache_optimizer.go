@@ -2,9 +2,7 @@
 //
 // This file is self-contained and manages custom prompt-cache logic for
 // Codex requests. Non-WebSocket Codex paths force store=false and delete
-// previous_response_id; response.id storage and previous_response_id
-// injection are intentionally not supported outside the WebSocket path,
-// where chaining is client-native.
+// previous_response_id.
 
 package executor
 
@@ -16,21 +14,10 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/runtime/executor/helps"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
-	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 )
 
-// isAPIKeyAuth returns true when the auth uses an API key
-// (codex-api-key → standard OpenAI API upstream) as opposed to
-// OAuth subscription (chatgpt.com backend).
-func isAPIKeyAuth(auth *cliproxyauth.Auth) bool {
-	if auth == nil || auth.Attributes == nil {
-		return false
-	}
-	return strings.TrimSpace(auth.Attributes["api_key"]) != ""
-}
-
-// ─── Hook 1: Post-tklite adjustments ──────────────────────────
+// CacheOptPostTKLite applies post-tklite adjustments.
 //
 // Called after tklite.Optimize() in Execute and ExecuteStream.
 // Non-WebSocket Codex paths force store=false and delete
@@ -38,31 +25,20 @@ func isAPIKeyAuth(auth *cliproxyauth.Auth) bool {
 // tklite may re-inject it and the upstream Responses API rejects that
 // field with HTTP 400 ("Unsupported parameter: prompt_cache_retention").
 func CacheOptPostTKLite(body []byte) []byte {
-	body, _ = sjson.DeleteBytes(body, "prompt_cache_retention")
+	body = StripPromptCacheRetention(body)
 	body, _ = sjson.DeleteBytes(body, "previous_response_id")
 	body, _ = sjson.SetBytes(body, "store", false)
 	return body
 }
 
-// ─── Hook 2: Resolve prompt_cache_key ─────────────────────────
-//
-// Called inside cacheHelper to decide whether to preserve
-// tklite's stable prompt_cache_key or use the generated uuid.
-//
-// API key path: preserve tklite's key (session-based, stable,
-// enables consistent cache routing across turns).
-//
-// OAuth path: use generated uuid (original behavior, chatgpt.com
-// accepts any key but doesn't need stable routing).
-func CacheOptResolveCacheKey(auth *cliproxyauth.Auth, rawJSON []byte, proposedID string) string {
-	if !isAPIKeyAuth(auth) {
-		return proposedID // OAuth: use uuid (original behavior)
-	}
-	existingKey := gjson.GetBytes(rawJSON, "prompt_cache_key").String()
-	if strings.TrimSpace(existingKey) != "" {
-		return existingKey // API key: preserve tklite's stable key
-	}
-	return proposedID // No tklite key found, use proposed uuid
+// StripPromptCacheRetention removes prompt_cache_retention, which tklite may
+// re-inject and the upstream APIs reject with HTTP 400
+// ("Unsupported parameter: prompt_cache_retention"). Used by CacheOptPostTKLite
+// and by the Claude and OpenAI-compat paths that have no
+// store/previous_response_id semantics.
+func StripPromptCacheRetention(body []byte) []byte {
+	out, _ := sjson.DeleteBytes(body, "prompt_cache_retention")
+	return out
 }
 
 // ─── Auth-scoped session key helpers ───────────────────────────
