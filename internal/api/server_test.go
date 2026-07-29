@@ -1811,8 +1811,8 @@ func TestFormatHomeClaudeModelIncludesAnthropicSchemaFields(t *testing.T) {
 	}
 
 	customModel := formatHomeClaudeModel(homeModelEntry{id: "gpt-4o", displayName: "GPT-4o"})
-	if got := customModel["id"]; got != "gpt-4o" {
-		t.Fatalf("id = %v, want gpt-4o", got)
+	if got := customModel["id"]; got != "claude-fable-5-dd-o4-tpg" {
+		t.Fatalf("id = %v, want claude-fable-5-dd-o4-tpg", got)
 	}
 	if got := customModel["display_name"]; got != "GPT-4o" {
 		t.Fatalf("display_name = %v, want GPT-4o", got)
