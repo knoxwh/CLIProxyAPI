@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"net/http"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -44,12 +45,43 @@ func collectCodexOutputItemDone(eventData []byte, outputItemsByIndex map[int64][
 	*outputItemsFallback = append(*outputItemsFallback, []byte(itemResult.Raw))
 }
 
+func hydrateCodexCompletedOutputItemIDs(eventData []byte, outputItems []gjson.Result, outputItemsByIndex map[int64][]byte) []byte {
+	patchedData := eventData
+	for outputIndex, outputItem := range outputItems {
+		itemData := []byte(outputItem.Raw)
+		itemID := gjson.GetBytes(itemData, "id")
+		if itemID.Exists() && itemID.Type != gjson.Null && (itemID.Type != gjson.String || strings.TrimSpace(itemID.String()) != "") {
+			continue
+		}
+
+		completedItem, ok := outputItemsByIndex[int64(outputIndex)]
+		if !ok {
+			continue
+		}
+		completedID := gjson.GetBytes(completedItem, "id")
+		if completedID.Type != gjson.String || strings.TrimSpace(completedID.String()) == "" {
+			continue
+		}
+
+		updatedData, errSet := sjson.SetRawBytes(patchedData, "response.output."+strconv.Itoa(outputIndex)+".id", []byte(completedID.Raw))
+		if errSet != nil {
+			continue
+		}
+		patchedData = updatedData
+	}
+	return patchedData
+}
+
 func patchCodexCompletedOutput(eventData []byte, outputItemsByIndex map[int64][]byte, outputItemsFallback [][]byte) []byte {
-	if len(outputItemsByIndex) == 0 && len(outputItemsFallback) == 0 {
-		return eventData
+	outputResult := gjson.GetBytes(eventData, "response.output")
+	if outputResult.Exists() && outputResult.IsArray() && len(outputResult.Array()) > 0 {
+		return hydrateCodexCompletedOutputItemIDs(eventData, outputResult.Array(), outputItemsByIndex)
 	}
 
-	outputResult := gjson.GetBytes(eventData, "response.output")
+	shouldPatchOutput := (!outputResult.Exists() || !outputResult.IsArray() || len(outputResult.Array()) == 0) && (len(outputItemsByIndex) > 0 || len(outputItemsFallback) > 0)
+	if !shouldPatchOutput {
+		return eventData
+	}
 
 	indexes := make([]int64, 0, len(outputItemsByIndex))
 	for idx := range outputItemsByIndex {
@@ -64,13 +96,6 @@ func patchCodexCompletedOutput(eventData []byte, outputItemsByIndex map[int64][]
 		items = append(items, outputItemsByIndex[idx])
 	}
 	items = append(items, outputItemsFallback...)
-
-	// Skip patching only if response.output is already a complete array
-	// covering all collected items. This preserves reasoning output items
-	// that the upstream may have omitted from the completed event.
-	if outputResult.Exists() && outputResult.IsArray() && len(outputResult.Array()) >= len(items) {
-		return eventData
-	}
 
 	outputArray := []byte("[]")
 	if len(items) > 0 {
